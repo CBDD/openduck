@@ -472,7 +472,7 @@ def prepare_sys_for_amber(ligand_file, protein_file, chunk_file, interaction, HM
         seed (str, optional): Seed value for random number generation during parameterization. Default is '-1'.
         fix_ligand_file (bool, optional): Whether or not to fix the ligand file during parameterization. Default is False.
     '''
-    from duck.steps.parameterize import prepare_system
+    from duck.steps.parametrize import prepare_system
     from duck.utils.cal_ints import find_interaction
     from duck.utils.amber_inputs import Amber_templates
     # Parameterize the ligand
