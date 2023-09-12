@@ -5,7 +5,7 @@ min_wqb={wqb_threshold}
     
 #### Runing Duck ####
 # Minimization
-pmemd.cuda -O -i 1_min.in -o min.out -p {top} -c system_complex.inpcrd -r min.rst -ref system_complex.inpcrd
+{comment}pmemd.cuda -O -i 1_min.in -o min.out -p {top} -c system_complex.inpcrd -r min.rst -ref system_complex.inpcrd
 
 # Centering box to allow iwrap, not being centered to 0,0,0 bricks the system when using iwrap and nmr restraints together
 echo -e "trajin min.rst\ncenter\ntrajout min.rst\nrun\nquit" | cpptraj -p {top}
@@ -38,4 +38,3 @@ for ((i=1;i<=$replicas;++i)); do
    check_WQB $min_wqb
 
 done
-    

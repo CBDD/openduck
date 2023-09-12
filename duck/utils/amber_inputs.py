@@ -48,7 +48,7 @@ Methods:
     copy_getWqbValues_script(): Copies the getWqbValues.py script from the queue templates directory to the current working directory.
     write_queue_file(kind): Generates a queue file with the given kind (template) and writes it to disk.
     """
-    def __init__(self, wqb_threshold=0, replicas=20, hmr=True, array_limit=False, keep_intermediate_files=False):
+    def __init__(self, wqb_threshold=0, replicas=20, hmr=True, array_limit=False, keep_intermediate_files=False, local_minimization=False):
         '''
         Initialize the Queue_templates class.
 
@@ -62,7 +62,8 @@ Methods:
         self.replicas = replicas
         self.hmr = hmr
         self.array_limit = array_limit
-        
+        self.local_minimization = local_minimization
+
         if hmr: self.top = 'HMR_system_complex.prmtop'
         else: self.top = 'system_complex.prmtop'
         
@@ -94,7 +95,7 @@ Methods:
         Private method to read command template files
         '''
         cmd_template = self._read_template('commands.txt')
-        return cmd_template.format(replicas=self.replicas, wqb_threshold = self.wqb_threshold, top = self.top, i='{i}')
+        return cmd_template.format(replicas=self.replicas, wqb_threshold = self.wqb_threshold, comment='#' if self.local_minimization else '', top = self.top, i='{i}')
     
     def _get_functions_string(self):
         '''
