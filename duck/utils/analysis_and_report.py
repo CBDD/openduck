@@ -142,13 +142,13 @@ def get_Wqb_value(file_duck_dat, mode='amber'):
         a = line.split()
         if mode == 'amber':
             if len(a) != 4:
-                print(f'{file_duck_dat} has the wrong format for {mode} duck report' )
+                eprint(f'{file_duck_dat} has the wrong format for {mode} duck report' )
                 exit(1)
             else:
                 data.append([float(a[0]), float(a[1]), float(a[2]), float(a[3])])
         elif mode == 'openmm':
             if len(a) != 10:
-                print(f'{file_duck_dat} has the wrong format for {mode} duck report' )
+                eprint(f'{file_duck_dat} has the wrong format for {mode} duck report' )
                 exit(1)
             else:
                 data.append([float(a[1]), float(a[3]), float(a[5]), float(a[8])])
@@ -186,7 +186,7 @@ def get_Wqb_value(file_duck_dat, mode='amber'):
                 Wqb_min_index = index_global
                 break
     if not Wqb_min_index:
-        eprint(f'Warning, could not find minima in {file_duck_dat}')
+        eprint(f'Warning: could not find minima in {file_duck_dat}')
         return (0, data, 0)
     Wqb_min = Work[Wqb_min_index]
     sub_max_data = data[Wqb_min_index:]
@@ -318,7 +318,8 @@ def get_expavg_FD_df(work_df, T=300, calculate_FD=True):
                 sqrtMSE = MSE**0.5
                 # Proper fluctuation dissipation (FD) using Kullback-leibler divergence
                 FD = average-Wdis
-                MSE_FD = 2*Wdis/(B*N)+(2*Wdis**2)/(N-1)
+                if Wdis: MSE_FD = 2*Wdis/(B*N)+(2*Wdis**2)/(N-1)
+                else: MSE_FD=0
                 sqrtMSE_FD = MSE_FD**0.5
             except:
                 pass
@@ -353,6 +354,9 @@ def shapiro_test(work_df):
     fig, ax = plt.subplots()
     #values = work_df.tail(1).values[0]
     values = np.array([work_df[coll].max() for coll in work_df.columns]) # get the real maximum for the shapiro, as it will be the one used
+    if len(values) <= 3:
+        eprint('Warning: Not enough data to perform a shapiro test')
+        return False
     statistic, p = shapiro(values)
     y, x, _ = ax.hist(values, bins = len(values)//2)
     ax.text(y = max(y)-1, x = max(x)-1.5, s ='Shapiro p = %s'%round(p,4))
@@ -365,11 +369,10 @@ def shapiro_test(work_df):
         return False
 
 def sample_jarz(norm_df, sample_size, temp):
-        
-        new_df = norm_df.sample(n=sample_size, replace=True,axis='columns', random_state=np.random.Generator(np.random.PCG64()))
-        new_df.columns = [f'Sample_{x}'for x in range(sample_size)]
-        jarz_df = get_expavg_FD_df(new_df, T=temp, calculate_FD=False)
-        return(jarz_df)
+    new_df = norm_df.sample(n=sample_size, replace=True,axis='columns', random_state=np.random.Generator(np.random.PCG64()))
+    new_df.columns = [f'Sample_{x}'for x in range(sample_size)]
+    jarz_df = get_expavg_FD_df(new_df, T=temp, calculate_FD=False)
+    return(jarz_df)
 
 def bootstrap_df(norm_data_list, sample_size = 20, samples=20, plot=True, temps=[300, 325]):
     """
@@ -395,6 +398,7 @@ def bootstrap_df(norm_data_list, sample_size = 20, samples=20, plot=True, temps=
         pool = mp.Pool(mp.cpu_count())
     jobs = []
     for temp, norm_df in zip(temps, norm_data_list):
+        if not len(norm_df): continue
         for i in range(samples):
             jobs.append(pool.apply_async(sample_jarz, args=(norm_df, sample_size, temp)))
     sample_dfs = [job.get() for job in jobs]
@@ -431,6 +435,12 @@ def get_stats_from_bootstrapping(flat_df, CVs):
 
 def average_dataframes(dataf1, dataf2):
     '''Return the average dataframe of two dataframes. Used as the average dataframe for the Fluctuation dissipation dataframe at the two different'''
+    if not len(dataf1) or not len(dataf2):
+        eprint('Warning: Not enough data to merge different temperatures')
+    if not len(dataf1):
+        return dataf2
+    elif not len(dataf2):
+        return dataf1
     new_df = pd.DataFrame(index=dataf1.index, columns=dataf1.columns)
     for i,r in dataf1.iterrows():
         for col,v300 in r.items():
