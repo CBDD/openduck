@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from math import log, exp
 import pickle
+import time
 
 #base functions
 def save_pickle(file, object):
@@ -85,7 +86,8 @@ def flatten_wqb_dict(info_dict):
                 v[j+1].append('Nan')
     return {ks: vs for ks, vs in zip(k, v)}
 
-def build_report_df(info_dict, mode='min'):
+def build_report_df(info_dict, mode='min', sorting_column='System'):
+    import re
     '''Generate a report DataFrame from the dictionary with the specified WQB or Jarzynski information depending on the mode'''
     if mode == 'min':
         df = pd.DataFrame({'System': list(info_dict.keys()), 'WQB':[wqb[0] for wqb in info_dict.values()]})
@@ -115,6 +117,10 @@ def build_report_df(info_dict, mode='min'):
         df = pd.merge(df, single_df, on='System')
     else:
         raise ValueError(f'{mode} is not a valid report mode. Try with min, all or avg.')
+    
+    df.sort_values(sorting_column, inplace=True)
+    # Sorts better when there is numbers, fails when there isn't
+    #df.sort_values(sorting_column, inplace=True, key=lambda col: col.map(lambda x: int(re.findall(r'\d+', x)[0])))
     return df
 
 #from maciej
@@ -199,7 +205,7 @@ def get_Wqb_value_Openmm_all(folder='duck_runs', pattern='smd_*.dat', plot=False
     Obtain the Wqb for all replicas in a openduck run from an openMM simulation.
     '''
     wqb_values = []
-    if plot: fig, ax = plt.subplots(figsize=(10,10))        
+    if plot: fig, ax = plt.subplots()        
     for dat_file in glob.glob(os.path.join(folder, pattern)):
         wqb_data = get_Wqb_value(dat_file, mode = 'openmm')
         wqb_values.append((dat_file, wqb_data[0]))
@@ -224,7 +230,7 @@ def get_Wqb_value_AMBER_all(prefix = 'DUCK', file = 'duck.dat', plot=False):
     for fol in os.listdir(os.getcwd()):
         if fol.startswith(prefix):
             folder.append(fol)
-    if plot: fig, ax = plt.subplots(figsize=(10,10))        
+    if plot: fig, ax = plt.subplots()        
     wqb_values = []
     for fol in folder:
         if os.path.isfile(os.path.join(fol,file)):
@@ -324,7 +330,7 @@ def get_expavg_FD_df(work_df, T=300, calculate_FD=True):
     return final_df
 
 def plot_expavg_FD(raw_data_df, FD_df):
-    RC = raw_data_df.index.values
+    RC = [float(x) for x in raw_data_df.index.values]
     fig, ax = plt.subplots()
     # Plot raw Wqb
     for i, duck_file in raw_data_df.T.iterrows():
@@ -335,12 +341,12 @@ def plot_expavg_FD(raw_data_df, FD_df):
     ax.plot(RC, FD_df['expavg'].values, 'g', linewidth=4)
     ax.plot(RC, FD_df['FD'].values,'r', linewidth=4)
     #ax.set_xticks(np.array([2.5,3.0,3.5,4.0,4.5,5.0]))
-    ax.set_xticks(np.append(RC[::1000], RC[-1]))
+    #ax.set_xticks(np.append(RC[::1000], RC[-1]))
     #print(RC)
 
     ax.set_ylabel('Free Energy (kcal/mol)')
     ax.set_xlabel('Distance (\u212B)')
-    fig.savefig('Wqb_plot_jarzynski.png') 
+    fig.savefig('wqb_plot_jarzynski.png') 
 
 def shapiro_test(work_df):
     #Perform a shapiro-wilk test to assess normality of the work values
@@ -360,7 +366,7 @@ def shapiro_test(work_df):
 
 def sample_jarz(norm_df, sample_size, temp):
         
-        new_df = norm_df.sample(n=sample_size, replace=True,axis='columns')
+        new_df = norm_df.sample(n=sample_size, replace=True,axis='columns', random_state=np.random.Generator(np.random.PCG64()))
         new_df.columns = [f'Sample_{x}'for x in range(sample_size)]
         jarz_df = get_expavg_FD_df(new_df, T=temp, calculate_FD=False)
         return(jarz_df)
@@ -400,7 +406,12 @@ def bootstrap_df(norm_data_list, sample_size = 20, samples=20, plot=True, temps=
     flat_df = pd.DataFrame(flat_dict)
     if plot:
         fig, ax = plt.subplots()
-        sns.lineplot(data=flat_df, x='CV',y='Jarzynski', errorbar='sd', ax=ax)
+        RC = [float(x) for x in sample_dfs[0].index]
+        avg_jarzs = [np.mean(list(flat_df[flat_df['CV'] == x]['Jarzynski'])) for x in RC]
+        std_jarzs = [np.std(list(flat_df[flat_df['CV'] == x]['Jarzynski'])) for x in RC]
+        ax.errorbar(x=RC, y=avg_jarzs,yerr=std_jarzs, color='lightblue', zorder=0)
+        ax.plot(RC,avg_jarzs, color='dodgerblue')
+        #ax.errorbar()
         ax.set_ylabel('Free Energy (kcal/mol)')
         ax.set_xlabel('Distance (\u212B)')
         fig.savefig('bootstraped_WQB_plot.png')
@@ -475,7 +486,9 @@ def do_jarzynski_analysis(temperatures = [300,325], index_threshold = 2500, samp
 
     # obtained bootstrapped data on jarzynski
     flat_bootstrapped_df, sampled_dfs = bootstrap_df(norm_datas, sample_size = sample_size, samples=samples, plot=plot, temps=temperatures)
-    save_pickle('resampling.pickle',(flat_bootstrapped_df, sampled_dfs)) # migh remove pickle saving
+    
+    #save_pickle('resampling.pickle',(flat_bootstrapped_df, sampled_dfs)) # migh remove pickle saving
+
     stats_df = get_stats_from_bootstrapping(flat_bootstrapped_df, CVs)
     avg,sd,sem_v, max_stats = get_real_jarzynski_from_bootstrapping(sampled_dfs, save='jarz_sd_sem.tbl')
 
@@ -495,6 +508,8 @@ if __name__=='__main__':
 
     args = parser.parse_args()
 
+    start_time = time.time()
+
     if args.output == 'stdout':
         args.output = sys.stdout
         
@@ -511,7 +526,7 @@ if __name__=='__main__':
             wqb = get_Wqb_value_AMBER_all(plot=args.plot)
             wqb_info[folder].extend(wqb)
         if args.mode == 'jarzynski' or args.mode == 'all':
-            expavg, sd, sem_v = do_jarzynski_analysis()
+            expavg, sd, sem_v = do_jarzynski_analysis(plot=args.plot)
             wqb_info[folder].extend([expavg, sd, sem_v])
 
         os.chdir(currdir)
