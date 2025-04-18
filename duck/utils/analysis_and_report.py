@@ -289,7 +289,7 @@ def get_expavg_FD_df(work_df, T=300, calculate_FD=True):
     final_df = pd.DataFrame(columns=['expavg', 'sqrtMSE', 'MSE', 'Bj', 'v', 'av', 'ai', 'Wdis', 'avg', 'variance', 'FD', 'sqrtMSE_FD'],
                             index = work_df.index)
     t_work = work_df.T
-    expBwork  = t_work.applymap(lambda x : exp(x*(-B)))
+    expBwork  = t_work.map(lambda x : np.exp(x*(-B)))
     N = len(work_df.columns) # Should be 5000 for DUck
 
     for rc, work_step in work_df.iterrows():
@@ -301,7 +301,7 @@ def get_expavg_FD_df(work_df, T=300, calculate_FD=True):
         variance = np.var(work_step)
 
         #Boltzman average for the step
-        expavg   = (-log(np.mean(expBwork.loc[:,rc])))/B
+        expavg   = (-np.log(np.mean(expBwork.loc[:,rc])))/B
         if calculate_FD: # I have added the option to skip it, as it was giving some overflow float problems with very big dissipations during sampling
             # Other parameter for the fluctuation dissipation formula (applied to the Boltzmann avg)
             # Dissipated work due to heat loss, Wdis = T*dS-dQ if Wdis >=0
@@ -309,8 +309,8 @@ def get_expavg_FD_df(work_df, T=300, calculate_FD=True):
             if np.isnan(Wdis) or Wdis < 0.02: # for very small Wdis we can neglect it
                 ai, av = 1, 1
             else:
-                ai = float(log(30*Wdis*B))/float(log(15*(exp(2*B*Wdis)-1)))
-                av=float(log(100*Wdis*B))/float(log(50*(exp(2*B*Wdis)-1)))
+                ai = float(np.log(30*Wdis*B))/float(np.log(15*(np.exp(2*B*Wdis)-1)))
+                av = float(np.log(100*Wdis*B))/float(np.log(50*(np.exp(2*B*Wdis)-1)))
             try:
                 Bj = Wdis/N**ai
                 v = variance/N**av
