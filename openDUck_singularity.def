@@ -14,6 +14,7 @@ From: ubuntu:22.04
     conda init
     conda install python=3.9
     conda install -c conda-forge mamba
+    conda install -c conda-forge ncurses
     mamba install numpy=1.23.5 yank=0.25.2 pdbfixer=1.7 openff-toolkit=0.9.0 parmed=3.4.3 cudatoolkit=11.7.0 openmm=7.5 openmmforcefields=0.9.0 ambertools=22.0 seaborn=0.12 -c conda-forge -c defaults
     pip install "openduck @ git+https://github.com/CBDD/openduck.git"
     pip cache purge

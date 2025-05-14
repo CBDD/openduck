@@ -58,6 +58,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "-p",
         "--protein",
+        "-r",
+        "--receptor",
         type=Path,
         required=True,
         help="Path to the receptor protein .pdb file.",
@@ -127,7 +129,7 @@ def parse_arguments() -> argparse.Namespace:
     # OpenDUck protocol settings
     duck_group = parser.add_argument_group("OpenDUck Protocol Settings")
     duck_group.add_argument(
-        "--interaction",
+        "--interaction", "-i",
         type=str,
         required=True,
         help="Interaction atom (e.g., _LEU_31_N).",
@@ -232,7 +234,6 @@ def resolve_singularity_image(user_arg: Optional[str]) -> Optional[Path]:
 
     # --singularity flag was used
     if user_arg:
-        check_singularity_available()
 
         if user_arg == "AUTO":
             if default_img.exists():
@@ -537,13 +538,13 @@ def main() -> None:
         if singularity_path:
             gpu_flag = "--nv " if args.gpu else ""
             run_command = (
-                f"OPENMM_CPU_THREADS={args.cores} "
+                f"PYTHONUNBUFFERED=1 OPENMM_CPU_THREADS={args.cores} "
                 f"singularity exec {gpu_flag}--bind $PWD {singularity_path} "
                 f"openduck openmm-full-protocol -y {yaml_filename}"
             )
         else:
             run_command = (
-                f"OPENMM_CPU_THREADS={args.cores} "
+                f"PYTHONUNBUFFERED=1 OPENMM_CPU_THREADS={args.cores} "
                 f"openduck openmm-full-protocol -y {yaml_filename}"
             )
 
