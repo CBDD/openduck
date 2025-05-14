@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-OpenDUck SLURM Job Generator
------------------------------
+OpenDUck OpenMM SLURM Job Launcher
+----------------------------------
+Automates the setup and submission of OpenDUck docking simulations using the OpenMM backend on SLURM clusters.
+
 Created on Thu Apr 10 11:35:19 2025
 Author: Jochem Nelen (jnelen@ucam.edu)
 
-This script prepares and launches SLURM jobs for OpenDUck docking simulations.
-It batches ligands into jobs, writes input SDFs and YAML configs, and constructs
-job scripts with SLURM directives based on user parameters.
+This script prepares SLURM jobs for OpenDUck docking runs with OpenMM.
+It batches ligand molecules, generates input SDF and YAML configuration files,
+and constructs job submission scripts with customizable SLURM parameters.
 """
 
 import argparse
@@ -21,7 +23,7 @@ import os
 import subprocess
 
 from pathlib import Path
-from typing import Tuple, List, Dict
+from typing import Tuple, List, Dict, Optional
 
 from rdkit import Chem
 
@@ -41,7 +43,8 @@ def parse_arguments() -> argparse.Namespace:
         argparse.Namespace: Parsed command-line arguments.
     """
     parser = argparse.ArgumentParser(
-        description="An automatic SLURM launcher for OpenDUck calculations."
+        description="An automatic SLURM launcher for OpenDUck calculations using the OpenMM backend.",
+        formatter_class=argparse.RawTextHelpFormatter,
     )
 
     # Required arguments
@@ -63,29 +66,29 @@ def parse_arguments() -> argparse.Namespace:
         "-o", "--output", type=Path, required=True, help="Output base directory."
     )
 
-    # SLURM settings
-    slurm_group = parser.add_argument_group("SLURM Settings")
-    slurm_group.add_argument(
+    # Job settings
+    job_group = parser.add_argument_group("Job Settings")
+    job_group.add_argument(
         "--time",
         "-t",
         "-tj",
         default="",
         help="Max runtime (e.g., 01:00:00)",
     )
-    slurm_group.add_argument(
+    job_group.add_argument(
         "--queue",
         "-qu",
         type=str,
         default="",
         help="Queue/partition to submit to.",
     )
-    slurm_group.add_argument(
+    job_group.add_argument(
         "--mem",
         "-m",
         default="4G",
         help="Memory per job (default: 4G).",
     )
-    slurm_group.add_argument(
+    job_group.add_argument(
         "--gpu",
         "-gpu",
         "--GPU",
@@ -93,19 +96,32 @@ def parse_arguments() -> argparse.Namespace:
         default=False,
         help="Use GPU.",
     )
-    slurm_group.add_argument(
+    job_group.add_argument(
         "--cores",
         "-c",
         type=int,
         default=None,
         help="Cores per job (default: 1 w/ GPU, else 8).",
     )
-    slurm_group.add_argument(
+    job_group.add_argument(
         "-j",
         "--jobs",
         type=int,
-        default=-1,
-        help="Number of jobs (default: one per compound).",
+        default=None,
+        help="Number of jobs.",
+    )
+    job_group.add_argument(
+        "--singularity",
+        nargs="?",
+        const="AUTO",
+        default=None,
+        metavar="IMG_PATH",
+        help=(
+            "Optional Singularity support:\n"
+            "  * omit the flag            : auto-detect runtime\n"
+            "  * --singularity            : use default openDUck.sif if present\n"
+            "  * --singularity IMG        : use the specified Singularity image"
+        ),
     )
 
     # OpenDUck protocol settings
@@ -185,6 +201,83 @@ def parse_arguments() -> argparse.Namespace:
     )
 
     return parser.parse_args()
+
+
+def check_singularity_available() -> None:
+    """Exit if singularity command is not available."""
+    if not shutil.which("singularity"):
+        logging.error(
+            "Singularity executable not found in PATH.\n"
+            "Please install Singularity or install openDUck and run without Singularity."
+        )
+        sys.exit(1)
+
+
+def resolve_singularity_image(user_arg: Optional[str]) -> Optional[Path]:
+    """
+    Decide which Singularity image (if any) to use.
+
+    Args:
+        user_arg: The --singularity argument from the CLI, or None.
+
+    Returns:
+        - Path to the Singularity image if using Singularity.
+        - None if running without Singularity.
+
+    Exits early if the environment is invalid.
+    """
+
+    # Default expected singularity image
+    default_img = Path("openDUck.sif").resolve()
+
+    # --singularity flag was used
+    if user_arg:
+        check_singularity_available()
+
+        if user_arg == "AUTO":
+            if default_img.exists():
+                logging.info("Using default Singularity image: %s", default_img)
+                return default_img
+            logging.error(
+                "Requested Singularity, but default image not found at: %s", default_img
+            )
+            sys.exit(1)
+        else:
+            img = Path(user_arg).expanduser().resolve()
+            if img.exists():
+                logging.info("Using user-specified Singularity image: %s", img)
+                return img
+            logging.error(
+                "Singularity image %s not found, please provide a correct path.", img
+            )
+            sys.exit(1)
+
+    if shutil.which("openduck"):
+        singularity_container = os.environ.get("SINGULARITY_CONTAINER")
+        if singularity_container:
+            logging.info(
+                "Detected running inside Singularity container: %s",
+                singularity_container,
+            )
+            return Path(singularity_container)
+        logging.info("Native OpenDUck detected. Running without Singularity.")
+        return None
+
+    if default_img.exists():
+        # Check if singularity is installed
+        check_singularity_available()
+
+        logging.info(
+            "Native OpenDUck not found. Falling back to Singularity image: %s",
+            default_img,
+        )
+        return default_img
+
+    logging.error(
+        "Cannot find native OpenDUck command or Singularity image.\n"
+        "Please install OpenDUck or place openDUck.sif in the launch directory."
+    )
+    sys.exit(1)
 
 
 def process_sdf(ligand_path: Path) -> Tuple[Dict[str, Chem.Mol], int]:
@@ -289,7 +382,10 @@ def batch_mols(molecules: List[str], num_jobs: int) -> List[List[str]]:
 
 
 def write_yaml(
-    yaml_path: Path, args: argparse.Namespace, protein_target_path: str, ligand_path: str
+    yaml_path: Path,
+    args: argparse.Namespace,
+    protein_target_path: str,
+    ligand_path: str,
 ) -> None:
     """
     Write a YAML configuration file for OpenDUck.
@@ -310,6 +406,7 @@ def write_yaml(
         "water_model": args.water_model,
         "HMR": args.HMR,
         "smd_cycles": args.smd_cycles,
+        "batch": args.batch,
     }
 
     if args.wqb_threshold is not None:
@@ -333,6 +430,9 @@ def main() -> None:
     Main function that manages the SLURM job generation process.
     """
     args = parse_arguments()
+
+    # Identify (potential) Singularity Path
+    singularity_path: Optional[Path] = resolve_singularity_image(args.singularity)
 
     # Set default cores if not explicitly provided.
     if args.cores is None:
@@ -362,26 +462,42 @@ def main() -> None:
     else:
         raise ValueError("Ligand path must be a file or directory.")
 
-    logging.info("Identified %d valid compounds, %d invalid", len(mol_dict), total_invalid_mols)
+    logging.info(
+        "Identified %d valid compounds, %d invalid", len(mol_dict), total_invalid_mols
+    )
 
     # Prepare the output directory and copy the protein file there
     output_dir: Path = prepare_output_directory(args.output)
     protein_target_path: str = shutil.copy(str(args.protein), str(output_dir))
 
+    # Ask for the number of jobs if not specified before
+    if args.jobs is None:
+        answer = input("Enter the number of jobs to run: ").strip()
+        if not answer:
+            logging.error("No input provided. Operation cancelled by user.")
+            sys.exit(1)
+        try:
+            args.jobs = int(answer)
+        except ValueError as e:
+            logging.error("Invalid input: %s. Operation cancelled.", e)
+            sys.exit(1)
+
     # Decide on job batching
-    if args.jobs <= 0 or args.jobs > len(mol_dict):
+    if args.jobs <= 0 or args.jobs >= len(mol_dict):
         args.jobs = len(mol_dict)
-        logging.info("Launching one job per compound...")
+        logging.info("More jobs than Compounds, launching one job per compound...")
+        args.batch = False
+    else:
+        args.batch = True
 
-    one_mol_per_job: bool = args.jobs == len(mol_dict)
     batches: List[List[str]] = batch_mols(list(mol_dict.keys()), args.jobs)
-
-    singularity_path: Path = Path("openDUck.sif").resolve()
 
     # Generate job directories and scripts
     for idx, mol_batch in enumerate(batches, start=1):
-        if one_mol_per_job:
-            safe_mol_name = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in mol_batch[0])
+        if not args.batch:
+            safe_mol_name = "".join(
+                c if c.isalnum() or c in ("-", "_") else "_" for c in mol_batch[0]
+            )
             folder_name = f"{idx}_{safe_mol_name}"
         else:
             folder_name = f"{idx}_batch_mols"
@@ -409,19 +525,31 @@ def main() -> None:
         )
 
         # Construct common SLURM arguments and job command
-        common_slurm_args: str = (
-            f"--mem {args.mem} --output=job_{idx}_%j.out --job-name=openDUck_{idx} -c {args.cores} {time_arg} {queue_arg}"
+        common_slurm_args = (
+            f"--mem {args.mem} "
+            f"--output=job_{idx}_%j.out "
+            f"--job-name=openDUck_{idx} "
+            f"-c {args.cores} "
+            f"{time_arg} {queue_arg} "
+            f"{'--gres=gpu:1' if args.gpu else ''}"
         ).strip()
 
-        gpu_flag: str = "--nv " if args.gpu else ""
-        run_command: str = (
-            f"OPENMM_CPU_THREADS={args.cores} singularity exec {gpu_flag}--bind $PWD {singularity_path} "
-            f"openduck openmm-full-protocol -y {yaml_filename}"
+        if singularity_path:
+            gpu_flag = "--nv " if args.gpu else ""
+            run_command = (
+                f"OPENMM_CPU_THREADS={args.cores} "
+                f"singularity exec {gpu_flag}--bind $PWD {singularity_path} "
+                f"openduck openmm-full-protocol -y {yaml_filename}"
+            )
+        else:
+            run_command = (
+                f"OPENMM_CPU_THREADS={args.cores} "
+                f"openduck openmm-full-protocol -y {yaml_filename}"
+            )
+
+        job_cmd: str = (
+            f'sbatch --chdir "{job_dir}" --wrap="{run_command}" {common_slurm_args}'
         )
-        job_cmd: str = f'sbatch --chdir "{job_dir}" --wrap="{run_command}"'
-        if args.gpu:
-            job_cmd += " --gres=gpu:1"
-        job_cmd += f" {common_slurm_args}"
 
         # Write the job script to file
         job_script_path: Path = job_dir / f"job_{idx}.sh"
@@ -430,17 +558,20 @@ def main() -> None:
             jobfile.write(job_cmd + "\n")
 
     launch_cmd = f'for f in {str(output_dir)}/*/job_*.sh; do sh "$f"; done'
-    
+
     # Write final launcher of all jobs
     with open(f"{output_dir}/launch_jobs.sh", "w") as job_launch_file:
-        job_launch_file.write("#!/usr/bin/env bash\n")    
+        job_launch_file.write("#!/usr/bin/env bash\n")
         job_launch_file.write(f"{launch_cmd}\n")
-    
+
     # Check if sbatch command is available
     if shutil.which("sbatch") is not None:
         subprocess.run(launch_cmd, shell=True)
     else:
-        logging.warning(f"The sbatch command doesn't seem to be available. Try to launch the jobs manually (without Singularity) by running:\nsh {output_dir}/launch_jobs.sh")
+        logging.warning(
+            f"The sbatch command doesn't seem to be available. Try to launch the jobs manually (without Singularity) by running:\nsh {output_dir}/launch_jobs.sh"
+        )
+
 
 if __name__ == "__main__":
     try:
