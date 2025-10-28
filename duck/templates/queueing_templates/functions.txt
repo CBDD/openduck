@@ -11,11 +11,11 @@ prepare_duck_and_launch(){{
          mkdir $dir
          cd $dir
          if [ "$nu" == "0" ]; then
-            pmemd.cuda -O -i ../duck.in -o duck_${nu}.o -p ../{top} -c ../3_eq.rst -r duck_${nu}.rst -x duck_${nu}.nc -e duck_${nu}.nc -e duck_${nu}.e -ref ../3_eq.rst
-            echo "pmemd.cuda -O -i ../duck.in -o duck_${nu}.o -p ../{top} -c ../3_eq.rst -r duck_${nu}.rst -x duck_${nu}.nc -e duck_${nu}.nc -e duck_${nu}.e -ref ../3_eq.rst" > cmd${nu}
+            pmemd.cuda -O -i ../duck.in -o duck_${nu}.o -p ../{top} -c ../3_eq.rst -r duck_${nu}.rst -x duck_${nu}.nc -e duck_${nu}.e -ref ../3_eq.rst
+            echo "pmemd.cuda -O -i ../duck.in -o duck_${nu}.o -p ../{top} -c ../3_eq.rst -r duck_${nu}.rst -x duck_${nu}.nc -e duck_${nu}.e -ref ../3_eq.rst" > cmd${nu}
          else
             pmemd.cuda -O -i ../duck.in -o duck_${nu}.o -p ../{top} -c ../md${nu}.rst -r duck_${nu}.rst -x duck_${nu}.nc -e duck_${nu}.e -ref ../3_eq.rst
-            echo "pmemd.cuda -O -i ../duck.in -o duck_${nu}.o -p ../{top} -c ../md${nu}.rst -r duck_${nu}.rst -x duck_${nu}.nc -e duck_${nu}.nc -e duck_${nu}.e -e ../3_eq.rst" > cmd${nu}
+            echo "pmemd.cuda -O -i ../duck.in -o duck_${nu}.o -p ../{top} -c ../md${nu}.rst -r duck_${nu}.rst -x duck_${nu}.nc -e duck_${nu}.e -ref ../3_eq.rst" > cmd${nu}
          fi
          cd ..  
       elif [ "$temp" == '325K' ]; then
@@ -23,11 +23,11 @@ prepare_duck_and_launch(){{
          mkdir $dir
          cd $dir
 	 if [ "$nu" == "0" ]; then
-            pmemd.cuda -O -i ../duck_325K.in -o duck_${nu}.o -p ../{top} -c ../3_eq.rst -r duck_${nu}.rst -x duck_${nu}.nc -e duck_${nu}.nc -e duck_${nu}.e -ref ../3_eq.rst
-            echo "pmemd.cuda -O -i ../duck_325K.in -o duck_${nu}.o -p ../{top} -c ../3_eq.rst -r duck_${nu}.rst -x duck_${nu}.nc -e duck_${nu}.nc -e duck_${nu}.e -ref ../3_eq.rst" > cmd${nu}
+            pmemd.cuda -O -i ../duck_325K.in -o duck_${nu}.o -p ../{top} -c ../3_eq.rst -r duck_${nu}.rst -x duck_${nu}.nc -e duck_${nu}.e -ref ../3_eq.rst
+            echo "pmemd.cuda -O -i ../duck_325K.in -o duck_${nu}.o -p ../{top} -c ../3_eq.rst -r duck_${nu}.rst -x duck_${nu}.nc -e duck_${nu}.e -ref ../3_eq.rst" > cmd${nu}
          else
             pmemd.cuda -O -i ../duck_325K.in -o duck_${nu}.o -p ../{top} -c ../md${nu}.rst -r duck_${nu}.rst -x duck_${nu}.nc -e duck_${nu}.e -ref ../3_eq.rst
-            echo "pmemd.cuda -O -i ../duck_325K.in -o duck_${nu}.o -p ../{top} -c ../md${nu}.rst -r duck_${nu}.rst -x duck_${nu}.nc -e duck_${nu}.nc -e duck_${nu}.e -e ../3_eq.rst" > cmd${nu}
+            echo "pmemd.cuda -O -i ../duck_325K.in -o duck_${nu}.o -p ../{top} -c ../md${nu}.rst -r duck_${nu}.rst -x duck_${nu}.nc -e duck_${nu}.e -ref ../3_eq.rst" > cmd${nu}
          fi 
          cd ..
       fi
