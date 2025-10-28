@@ -21,6 +21,7 @@ def run_steered_md(
     force_constant_chunk=0.1,
     init_velocity=0.00001,
     gpu_id=0,
+    hmr=False
 ):
     '''
     Run steered molecular dynamics (SMD) simulation in openMM, pulling a ligand along its main interaction with the protein, and write the results to output files.
@@ -42,10 +43,12 @@ def run_steered_md(
     if os.path.isfile(pdb_out_file):
         print(f'{pdb_out_file} is already calculated, skipping' )
         return
+    
+    dt,  steps_per_move, steps_to_report = 0.002, 200, 2000
+    if hmr: dt, steps_per_move, steps_to_report = 0.004, 100, 1000
     spring_k = spring_constant * u.kilocalorie / (u.mole * u.angstrom * u.angstrom)
     dist_in = startdist * u.angstrom  # in angstrom
     dist_fin = (startdist + 2.5) * u.angstrom  # in angstrom
-    steps_per_move = 200
     velocity = init_velocity * u.angstrom
     # Platform definition
     platformProperties = {}
@@ -79,7 +82,7 @@ def run_steered_md(
     )
     # Integrator
     integrator = mm.LangevinIntegrator(
-        temperature, 4 / u.picosecond, 0.002 * u.picosecond
+        temperature, 4 / u.picosecond, dt * u.picosecond
     )
     # Setting Simulation object and loading the checkpoint
     simulation = app.Simulation(
@@ -100,7 +103,7 @@ def run_steered_md(
     system.addForce(pullforce)
     # Redefine integrator and simulation, and load checkpoint with new-updated system
     integrator = mm.LangevinIntegrator(
-        temperature, 4 / u.picosecond, 0.002 * u.picosecond
+        temperature, 4 / u.picosecond, dt * u.picosecond
     )
     simulation = app.Simulation(
         combined_pmd.topology, system, integrator, platform, platformProperties
@@ -128,7 +131,7 @@ def run_steered_md(
             speed=True,
         )
     )
-    simulation.reporters.append(app.DCDReporter(traj_out_file, 2000))
+    simulation.reporters.append(app.DCDReporter(traj_out_file, steps_to_report))
     f = open(dat_out_file, "w")
     # Production in N steps with the update every 200 steps (2 pm)
     for i in range(steps):

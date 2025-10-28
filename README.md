@@ -22,6 +22,21 @@ $ conda env create -f environment.yaml
 $ conda activate openduck
 $ python setup.py install
 ```
+### Singularity
+A Singularity definition file (`openDUck_singularity.def`) is included in the repository.  
+This can be used to build a self-contained Singularity image, allowing you to conveniently run OpenDUck calculations without worrying about installing dependencies manually.
+
+To build the Singularity image, run:
+
+```{bash}
+singularity build openDUck.sif openDUck_singularity.def 
+```
+
+Once built, you can execute OpenDUck commands directly inside the container. For example:
+
+```{bash}
+singularity exec openDUck.sif openduck -h
+```
 
 ## OpenDUck usage
 
@@ -85,16 +100,13 @@ The full protocol executes the following steps:
 ```{bash}
 $ openduck openmm-full-protocol -h
 
-usage: openduck openmm-full-protocol [-h] [-y YAML_INPUT] [-l LIGAND] [-i INTERACTION] [-r RECEPTOR] [-g GPU_ID]
-                                     [--do-chunk] [-c CUTOFF] [-b] [-f {SMIRNOFF,GAFF2}] [-w {tip3p,spce}]
-                                     [-ff {amber99sb,amber14-all}] [-ion IONIC_STRENGTH]
-                                     [-s SOLVENT_BUFFER_DISTANCE] [-water WATERS_TO_RETAIN] [-fl]
-                                     [-F FORCE_CONSTANT_EQ] [-n SMD_CYCLES] [-m MD_LENGTH] [-W WQB_THRESHOLD]
-                                     [-v INIT_VELOCITIES] [-d INIT_DISTANCE]
+usage: openduck openmm-full-protocol [-h] [-y YAML_INPUT] [-l LIGAND] [-i INTERACTION] [-r RECEPTOR] [-g GPU_ID] [--keep-all-files] [--do-chunk] [-c CUTOFF] [-b] [-f {SMIRNOFF,GAFF2}]
+                                     [-w {tip3p,spce}] [-ff {amber99sb,amber14-all}] [-ion IONIC_STRENGTH] [-s SOLVENT_BUFFER_DISTANCE] [-water WATERS_TO_RETAIN] [-cf CUSTOM_FORCEFIELD]
+                                     [-fl] [-H] [-F FORCE_CONSTANT_EQ] [-n SMD_CYCLES] [-m MD_LENGTH] [-W WQB_THRESHOLD] [-v INIT_VELOCITIES] [-d INIT_DISTANCE] [-B] [-t THREADS] [--resume]
+                                     [-i0 INDEX0] [-p PREFIX]
 
-Full dynamic undocking protocol in OpenMM. The ligand, receptor and solvation box are parameterized with the
-specified parameters. If specified, the receptor is reduced to a chunked pocket. After equilibration, serial
-iterations of MD and SMD are performed until the WQB or max_cycles threshold is reached.
+Full dynamic undocking protocol in OpenMM. The ligand, receptor and solvation box are parameterized with the specified parameters. If specified, the receptor is reduced to a chunked pocket.
+After equilibration, serial iterations of MD and SMD are performed until the WQB or max_cycles threshold is reached.
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -113,8 +125,7 @@ Main arguments:
   --keep-all-files      Disable cleaning up intermediate files during simulations.
 
 Chunking arguments:
-  --do-chunk            Chunk initial receptor based on the interaction with ligand and add
-                        cappings.
+  --do-chunk            Chunk initial receptor based on the interaction with ligand and add cappings.
   -c CUTOFF, --cutoff CUTOFF
                         Cutoff distance to define chunking (in Angstroms). Default = 9 A.
   -b, --ignore-buffers  Do not remove buffers (solvent, ions etc.)
@@ -127,16 +138,16 @@ Parameterization arguments:
   -ff {amber99sb,amber14-all}, --protein-forcefield {amber99sb,amber14-all}
                         Protein forcefield to parameterize the chunked protein.
   -ion IONIC_STRENGTH, --ionic-strength IONIC_STRENGTH
-                        Ionic strength (concentration) of the counter ion salts (Na+/Cl-). Default
-                        = 0.1 M
+                        Ionic strength (concentration) of the counter ion salts (Na+/Cl-). Default = 0.1 M
   -s SOLVENT_BUFFER_DISTANCE, --solvent-buffer-distance SOLVENT_BUFFER_DISTANCE
-                        Buffer distance between the periodic box and the protein (in Angstroms).
-                        Default = 10 A
+                        Buffer distance between the periodic box and the protein (in Angstroms). Default = 10 A
   -water WATERS_TO_RETAIN, --waters-to-retain WATERS_TO_RETAIN
-                        PDB file containing structural water molecules to retain during
-                        simulations. Default is waters_to_retain.pdb.
-  -fl, --fix-ligand     Some simple fixes for the ligand: ensure tetravalent nitrogens have the
-                        right charge assigned and add missing hydrogen atoms.
+                        PDB file containing structural water molecules to retain during simulations. Default is waters_to_retain.pdb.
+  -cf CUSTOM_FORCEFIELD, --custom-forcefield CUSTOM_FORCEFIELD
+                        Custom forcefield (in Open Force Field XML format) to parameterize e.g. a cofactor or unnatural amino acid present in the PDB file included under --receptor. Will be
+                        used in addition to the forcefields specified by --small-molecule-forcefield and --protein-forcefield.
+  -fl, --fix-ligand     Some simple fixes for the ligand: ensure tetravalent nitrogens have the right charge assigned and add missing hydrogen atoms.
+  -H, --HMR             Perform Hydrogen Mass Repartition on the topology and run at dt=0.04 ps.
 
 MD/SMD production arguments:
   -F FORCE_CONSTANT_EQ, --force-constant-eq FORCE_CONSTANT_EQ
@@ -146,14 +157,23 @@ MD/SMD production arguments:
   -m MD_LENGTH, --md-length MD_LENGTH
                         Length of MD sampling between SMD runs in ns.
   -W WQB_THRESHOLD, --wqb-threshold WQB_THRESHOLD
-                        Minimum WQB threshold; if not reached after each SMD cycle, further
-                        simulations will be terminated. If not set (default), all SMD cycles will
-                        be run.
+                        Minimum WQB threshold; if not reached after each SMD cycle, further simulations will be terminated. If not set (default), all SMD cycles will be run.
   -v INIT_VELOCITIES, --init-velocities INIT_VELOCITIES
                         Set initial velocities when heating.
   -d INIT_DISTANCE, --init-distance INIT_DISTANCE
                         Set initial hydrogen bond distance for SMD in Angstroms. Default = 2.5 A.
+
+Batch arguments:
+  -B, --batch           Enable batch processing for multi-ligand SDF.
+  -t THREADS, --threads THREADS
+                        Define number of CPUs for batch processing.
+  --resume              Enable the resume mode. Protecting LIG_target folders already prepared and starting from the not done, avoiding overwritting.
+  -i0 INDEX0, --index0 INDEX0
+                        Starting index for naming batch ligands. Default: 1.
+  -p PREFIX, --prefix PREFIX
+                        Prefix to name ligand folder during batch preparation. Default: LIG_target.
 ```
+
 A valid example is provided in the test subfolder, and can be executed using the command-line arguments like the following:
 
 ```{bash}
@@ -161,7 +181,7 @@ $ openduck openmm-full-protocol -l brd4_lig.mol -r 4LR6_aligned_chunk_nowat.pdb 
                                 -g 0 -f GAFF2 -ff amber14-all -w tip3p -w 6 -n 20
 ```
 
-Similarly, an execution with the input parameters in a yaml is also possible (the example has slightly different parameters as the command line, just for ilustration purposes ).
+Similarly, an execution with the input parameters in a yaml is also possible (the example has slightly different parameters as the command line, just for ilustration purposes).
 ```{bash}
 openduck openmm-full-protocol -y input.yaml
 ```
@@ -195,6 +215,43 @@ init_velocities : 0.00001
 init_distance : 2.5
 fix_ligand : False
 ```
+#### Batch launching OpenMM SLURM jobs with `openmm_job_launcher`
+
+For larger sets of ligands, OpenDUck now provides a dedicated launcher tool called `openmm_job_launcher` to facilitate batch execution across SLURM clusters.
+
+This script automates:
+- Splitting a multi-ligand SDF into batches.
+- Preparing corresponding input SDF and YAML configuration files.
+- Creating SLURM submission scripts for each job.
+- Optionally running the jobs inside a Singularity container.
+- Supporting both CPU and GPU executions.
+
+The launcher is particularly useful for virtual screening campaigns where a large number of ligands need to be processed efficiently.
+
+You can access the help menu with:
+
+```bash
+openmm-job-launcher --help
+```
+A basic usage example:
+```bash
+openmm-job-launcher --ligand my_ligands.sdf --protein receptor.pdb --interaction A_ASN_140_ND2 --output jobs_output --jobs 4 --gpu --smd-cycles 5
+```
+
+This will:
+
+- Split the input ligands into 10 jobs.
+- Prepare the required input files for each job.
+- Create SLURM scripts ready for submission.
+- Launch the jobs automatically if sbatch is available.
+
+There is also support for running jobs inside a Singularity container, which can be especially useful on HPC systems.
+If a native `openduck` installation is not detected, the launcher will automatically attempt to use a default `openDUck.sif` image, if available.
+Alternatively, you can explicitly specify a Singularity image using the `--singularity [singularity_path]` argument:
+
+```bash
+openmm-job-launcher --ligand my_ligands.sdf --protein receptor.pdb --interaction A_ASN_140_ND2 --output jobs_output --jobs 10 --gpu --singularity openDUck.sif
+```
 
 #### openmm-prepare & openmm-from-equilibrated
 
@@ -210,7 +267,7 @@ The OpenDUck protocol can also be executed independently in two steps: the prepa
     openmm-from-equilibrated
       * (MD + SMD@300K + SMD@325K + WQB check ) x smd-cycles
 
-Each of the two subcommads share arguments with the openmm-full-protocol, based on the execution steps they have in common. As with the previus command, the execution can come from flagged arguments or with the same arguments in a yaml input file.
+Each of the two subcommands share arguments with the openmm-full-protocol, based on the execution steps they have in common. As with the previous command, the execution can come from flagged arguments or with the same arguments in a yaml input file.
 
 Sample yaml input files for `openmm-prepare` and `openmm-from-equilibrated` are provided below:
 
@@ -295,7 +352,7 @@ optional arguments:
 
 ```
 
-If prefered, the script can also be executed from a yaml file with the commands. A sample input.yaml file could be the following:
+If preferred, the script can also be executed from a yaml file with the commands. A sample input.yaml file could be the following:
 ```{yaml}
 interaction: A_ASN_140_ND2
 coordinates: system_complex.inpcrd
@@ -371,9 +428,23 @@ Parameterization arguments:
   -water WATERS_TO_RETAIN, --waters-to-retain WATERS_TO_RETAIN
                         PDB file containing structural water molecules to retain during
                         simulations. Default is waters_to_retain.pdb.
+  -cf CUSTOM_FORCEFIELD, --custom-forcefield CUSTOM_FORCEFIELD
+                        Custom forcefield (in Open Force Field XML format) to parameterize e.g. a
+                        cofactor or unnatural amino acid present in the PDB file included under
+                        --receptor. Will be used in addition to the forcefields specified by --small-
+                        molecule-forcefield and --protein-forcefield.
   --seed SEED           Specify seed for AMBER inputs.
   -fl, --fix-ligand     Some simple fixes for the ligand: ensure tetravalent nitrogens have the
                         right charge assigned and add missing hydrogen atoms.
+  --water-steering      Enable water steering, which will use the waters-to-retain as interaction
+                        vector to steer the ligand.
+  --waters-to-restrain WATERS_TO_RESTRAIN
+                        Number (and order) of waters to restraint. Default is None when executing in
+                        the normal mode and 1 when using water-steering.
+  -e LIGAND_HB_ELEMENTS [LIGAND_HB_ELEMENTS ...], --ligand-hb-elements LIGAND_HB_ELEMENTS [LIGAND_HB_ELEMENTS ...]
+                        Control which elements are accepted in the ligand to define the steering
+                        interaction. Specify using the atomic number separated with a space. Default is
+                        7 and 8 (nitrogen and oxygen)
 
 Batch argments:
   -B, --batch           Enable batch processing for multi-ligand SDF.
@@ -488,4 +559,3 @@ GAFF2_tip4pew/  9.007291835327141   0.33968295997031067 0.05439280525909316
 GAFF2_spce/ 7.31123937991228    0.24521160219077848 0.03926528115039682
 
 ```
-

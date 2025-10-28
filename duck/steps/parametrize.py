@@ -94,6 +94,7 @@ def prepare_system(ligand_file, protein_file, forcefield_str="amber99sb.xml", wa
     print("loading system")
    # protein = parmed.load_file("fixed.pdb")["!(:HOH,NA,CL)"]  # remove ions and water
     protein = parmed.load_file("fixed.pdb")  # don't remove ions and water
+    print(f'Loading custom forcefield {custom_forcefield}')
     if custom_forcefield:
         forcefield = app.ForceField(forcefield_str, custom_forcefield)
     else:

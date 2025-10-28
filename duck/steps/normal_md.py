@@ -17,6 +17,7 @@ def perform_md(
     md_len=1.0,
     force_constant_chunk=0.1,
     gpu_id=0,
+    dt = 0.002
 ):
     '''
 Performs molecular dynamics (MD) simulation of a ligand-protein complex using OpenMM.
@@ -31,6 +32,7 @@ Arguments:
 - md_len (float, optional): Length of the MD simulation (in nanoseconds). Default is 1.0.
 - force_constant_chunk (float, optional): Force constant of the harmonic restraint on the chunk position (in kJ/mol/nm^2). Default is 0.1.
 - gpu_id (int, optional): ID of the GPU device to use, or None for CPU. Default is 0.
+- dt (float, opentional): Time interval in picoseconds of steps during the simulation. Default is 0.002.
 
 If the output checkpoint file already exists, the function returns without performing the simulation.
 
@@ -59,7 +61,7 @@ Raises:
     key_interaction = pkl[1:]
     pickle_in.close()
     MD_len = md_len * u.nanosecond
-    sim_steps = round(MD_len / (0.002 * u.picosecond))
+    sim_steps = round(MD_len / (dt * u.picosecond))
     # Platform definition
     
     platformProperties = {}
@@ -94,7 +96,7 @@ Raises:
     )
     # Integrator
     integrator = mm.LangevinIntegrator(
-        300 * u.kelvin, 4 / u.picosecond, 0.002 * u.picosecond
+        300 * u.kelvin, 4 / u.picosecond, dt * u.picosecond
     )
     # Setting Simulation object and loading the checkpoint
     simulation = app.Simulation(

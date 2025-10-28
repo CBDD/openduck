@@ -8,7 +8,7 @@ from duck.utils import duck_stuff
 from duck.utils import cal_ints
 from duck.utils.exceptions import EquilibrationError
 
-def do_equlibrate(force_constant_equilibrate=1.0,gpu_id=0, keyInteraction=None, clean=False):
+def do_equlibrate(force_constant_equilibrate=1.0,gpu_id=0, keyInteraction=None, clean=False, hmr=False):
     """
     Function to perform minimization, heating, and density equilibration simulations of the protein-ligand complex in openMM.
 
@@ -74,22 +74,24 @@ def do_equlibrate(force_constant_equilibrate=1.0,gpu_id=0, keyInteraction=None, 
     ##########################
     ##########################
     #new minimised positions, however using old restraints
+    dt, steps, steps_to_report = 0.002, 50000, 1000 # 0.1 ns
+    if hmr: dt, steps, steps_to_report = 0.004, 25000, 500
     # Define new system
     system = combined_pmd.createSystem(nonbondedMethod=app.PME, nonbondedCutoff=9*u.angstrom, constraints=app.HBonds, hydrogenMass=None)
     # Apply force on all havy atoms of chunk and apply restraint for the ligand-chunk distance
     duck_stuff.applyHarmonicPositionalRestraints(system, force_constant_equilibrate, combined_pmd.positions, Chunk_Heavy_Atoms)
     duck_stuff.applyLigandChunkRestraint(system, force_constant_equilibrate, 10.0, 2*u.angstrom, 3*u.angstrom, 4*u.angstrom, keyInteraction)
     # Intergator
-    integrator = mm.LangevinIntegrator(300*u.kelvin, 4/u.picosecond, 0.002*u.picosecond)
+    integrator = mm.LangevinIntegrator(300*u.kelvin, 4/u.picosecond, dt*u.picosecond)
     # Define Simulation
     simulation = app.Simulation(combined_pmd.topology, system, integrator, platform,platformProperties)
     simulation.context.setPositions(positions) #changing coordintes to minimized
     # Reporters
-    simulation.reporters.append(app.StateDataReporter("heating.csv", 1000, time=True, potentialEnergy=True, temperature=True, density=True, remainingTime=True, speed=True, totalSteps=50000))
-    simulation.reporters.append(app.DCDReporter("heating.dcd", 1000))
+    simulation.reporters.append(app.StateDataReporter("heating.csv", steps_to_report, time=True, potentialEnergy=True, temperature=True, density=True, remainingTime=True, speed=True, totalSteps=50000))
+    simulation.reporters.append(app.DCDReporter("heating.dcd", steps_to_report))
     # Heating the system
     print("Heating ... ")
-    simulation.step(50000) # 0.01 ns
+    simulation.step(steps) # 0.1 ns
     # Save the positions and velocities
     positions = simulation.context.getState(getPositions=True).getPositions()
     velocities = simulation.context.getState(getVelocities=True).getVelocities()
@@ -103,11 +105,11 @@ def do_equlibrate(force_constant_equilibrate=1.0,gpu_id=0, keyInteraction=None, 
     ##########################
     simulation = duck_stuff.setUpNPTEquilibration(system, combined_pmd,platform, platformProperties, positions, velocities)
     # Reporters
-    simulation.reporters.append(app.StateDataReporter("density.csv", 1000, time=True, potentialEnergy=True, temperature=True, density=True, remainingTime=True, speed=True, totalSteps=50000))
-    simulation.reporters.append(NetCDFReporter("3_eq.nc", 1000, vels=True))
+    simulation.reporters.append(app.StateDataReporter("density.csv", steps_to_report, time=True, potentialEnergy=True, temperature=True, density=True, remainingTime=True, speed=True, totalSteps=50000))
+    simulation.reporters.append(NetCDFReporter("3_eq.nc", steps_to_report, vels=True))
     # Correcting the density
     print("Correcting density")
-    simulation.step(50000) # 0.01 ns
+    simulation.step(steps) # 0.1 ns
     # Save the positions and velocities
     positions = simulation.context.getState(getPositions=True).getPositions()
     velocities = simulation.context.getState(getVelocities=True).getVelocities()
