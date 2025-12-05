@@ -265,7 +265,10 @@ def chunk_with_amber(
     Returns a list containing the path to the output .pdb file.
     '''
     # Load up the topology
-    mol = Chem.MolFromMolFile(mol_file)
+    if mol_file.endswith('mol'): mol = Chem.MolFromMolFile(mol_file)
+    elif mol_file.endswith('sdf') or mol_file.endswith('sd'):
+        sup = Chem.SDMolSupplier(mol_file)
+        mol = next(sup)
     pdb_mol_file = mol_file.replace(".mol", ".pdb")
     Chem.MolToPDBFile(mol, pdb_mol_file)
     protein = parmed.load_file(prot_file)
