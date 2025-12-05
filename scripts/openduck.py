@@ -656,6 +656,7 @@ def openmm_prepare_ligand_in_folder(ligand_string, lig_indx, protein, chunk, int
     from contextlib import redirect_stdout
 
     #Create the ligand folder
+    os.chdir(base_dir)
     lig_dir = f'{prefix}_{lig_indx}'
     if os.path.isdir(lig_dir) and not resume:
         print(f'WARNING: {lig_dir} already exists and it will be overwritten.')
