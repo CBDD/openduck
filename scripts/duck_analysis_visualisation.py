@@ -5,61 +5,28 @@ import yaml
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from scipy.stats import linregress
-import MDAnalysis as mda
-from MDAnalysis.analysis import align
-from MDAnalysis.analysis.rms import RMSF
+from duck.utils.vmd_template import get_chunk_residue, vmd_template
+from duck.utils.analysis_and_report import read_duck_dat, find_wqb_min_index
 
 def get_Wqb_value(file_duck_dat):
     """
-    Taken from Maciej's MOD repo: https://github.com/MaciejMajew/OpenDUck/blob/master/duck_final/getWqbValue.py
+    WQB of one SMD report (any format supported by duck.utils.analysis_and_report.read_duck_dat).
+
+    Unlike the library version, the first row is skipped and, if no local work minimum is found, the global
+    minimum of the trace is used instead of returning 0.
     :param file_duck_dat:
-    :return:
+    :return: (wqb, data, wqb_min), data columns being r0 (A), r (A), force and work
     """
-    f = open(file_duck_dat, 'r')
-    data = []
-    for line in f:
-        a = line.split()
-        data.append([float(a[1]), float(a[3]), float(a[5]), float(a[8])])
-    f.close()
-    data = np.array(data[1:])
+    data = read_duck_dat(file_duck_dat)[1:]
     Work = data[:, 3]
-    # split it into segments of 200 points
-    num_segments = int(len(data) / 200)
-    # alayze each segment to see if minimum in the segment is the local minimum
-    # local minimum is the point with the lowest value of 200 neighbouring points
-    # first local minumum is miminum used later to duck analysis
-    for segment in range(num_segments):
-        # detecting minium inthe segment
-        sub_data = data[segment * 200: (segment + 1) * 200]
-        sub_Work = sub_data[:, 3]
-        index_local = np.argmin(sub_Work)
-        # segment of 200 points arround detected minimum
-        index_global = index_local + segment * 200
-        if index_global > 100:
-            sub2_data = data[index_global - 100: index_global + 101]
-        else:
-            sub2_data = data[0: index_global + 101]
-        sub2_Work = sub2_data[:, 3]
-        index_local2 = np.argmin(sub2_Work)
-        if index_global < 100:
-            if index_local2 == index_global:
-                Wqb_min_index = index_global
-            break
-        else:
-            if index_local2 == 100:
-                Wqb_min_index = index_global
-                break
+    Wqb_min_index = find_wqb_min_index(Work)
     # For some of my traces, the local minimum doesn't work. IN that case, try defaulting to the global minimum.
-    if not 'Wqb_min_index' in locals():
+    if Wqb_min_index is None:
         print('Cannot find minimum Wqb index for file {} \n Setting it to the minimium work observed in the trace'.format(file_duck_dat))
         Wqb_min_index = np.argmin(Work)
 
     Wqb_min = Work[Wqb_min_index]
-    sub_max_data = data[Wqb_min_index:]
-    sub_max_Work = sub_max_data[:, 3]
-
-    Wqb_max = max(sub_max_Work)
+    Wqb_max = max(Work[Wqb_min_index:])
 
     Wqb_value = Wqb_max - Wqb_min
     return (Wqb_value, data, Wqb_min)
@@ -159,143 +126,6 @@ def make_all_wqb_runs_df(dat_dict):
             all_wqb_list.append(di[1][0])
     all_df = pd.DataFrame(data=np.array([interact_list, dat_file_list, all_wqb_list]).T, columns= ['Interaction', 'dat_file','Wqb'])
     return all_df
-
-def get_chunk_residue(original_pdb, chunk_pdb, target_residue_name, target_residue_number):
-    pdb_univ = mda.Universe(original_pdb, format='PDB')
-    chunk_univ = mda.Universe(chunk_pdb, format='PDB')
-
-    # Get the calpha atom of the pdb target residue:
-    target_res_calpha = pdb_univ.select_atoms(f"resname {target_residue_name} and resnum {target_residue_number} and name CA")
-
-    # Get all the chunk calphas of the same residue type
-    chunk_resis = chunk_univ.select_atoms(f"resname {target_residue_name} and name CA")
-
-    # Get the distances between the trget calpha and those of the chunk
-    distances = np.array([mda.analysis.rms.rmsd(target_res_calpha[0].position, chunk_resis[i].position) for i in range(len(chunk_resis))])
-
-    smallest_distance = distances[np.argmin(distances)]
-    if smallest_distance > 0.5:
-        print(f'Alignment for {original_pdb} displaced')
-
-    # Target chunk atom should be the closest
-    target_chunk_atom = chunk_resis[np.argmin(distances)]
-
-    return (target_chunk_atom.resname, target_chunk_atom.resid)
-
-
-def vmd_template(pdb_file, dcd_file, ligand_selection, residue_selection):
-    lig_and_res_sel = "{" + ligand_selection + " and (" + residue_selection + ")}"
-    ligand_selection = "{"+ ligand_selection + "}"
-    residue_selection = "{"+ residue_selection + "}"
-
-    print(lig_and_res_sel)
-
-    vmd_str = """
-    #!/usr/local/bin/vmd
-    # VMD script written by save_state $Revision: 1.47 $
-    # VMD version: 1.9.3
-    set viewplist {}
-    set fixedlist {}
-    proc vmdrestoremymaterials {} {
-      set mlist { Opaque Transparent BrushedMetal Diffuse Ghost Glass1 Glass2 Glass3 Glossy HardPlastic MetallicPastel Steel Translucent Edgy EdgyShiny EdgyGlass Goodsell AOShiny AOChalky AOEdgy BlownGlass GlassBubble RTChrome }
-      set mymlist [material list]
-      foreach mat $mlist {
-        if { [lsearch $mymlist $mat] == -1 } { 
-          material add $mat
-        }
-      }
-    }
-    vmdrestoremymaterials
-    """
-
-    vmd_str += """
-    # Display settings
-
-    mol new {0} type pdb first 0 last -1 step 1 filebonds 1 autobonds 1 waitfor all
-    mol addfile {1} type dcd first 0 last -1 step 1 filebonds 1 autobonds 1 waitfor all
-
-    mol delrep 0 top
-    mol representation Licorice 0.300000 12.000000 12.000000
-    mol color Name
-    mol selection {2}
-    mol material Opaque
-    mol addrep top
-    mol selupdate 0 top 0
-    mol colupdate 0 top 0
-    mol scaleminmax top 0 0.000000 0.000000
-    mol smoothrep top 0 0
-    """.format(pdb_file, dcd_file, ligand_selection)
-
-    vmd_str += """
-    mol drawframes top 0 {now}
-
-    mol representation Lines 1.000000
-    mol color Name
-    mol selection {protein}
-    mol material Opaque
-    mol addrep top
-    mol selupdate 1 top 0
-    mol colupdate 1 top 0
-    mol scaleminmax top 1 0.000000 0.000000
-    mol smoothrep top 1 0
-    mol drawframes top 1 {now}
-    """
-
-    vmd_str += """
-    mol representation Licorice 0.300000 12.000000 12.000000
-    mol color Name
-    mol selection {0}
-    mol material Opaque
-    mol addrep top
-    mol selupdate 2 top 0
-    mol colupdate 2 top 0
-    mol scaleminmax top 2 0.000000 0.000000
-    mol smoothrep top 2 0
-    """.format(residue_selection)
-
-    vmd_str += """
-    mol drawframes top 2 {now}
-    mol representation HBonds 3.000000 20.000000 10.000000
-    mol color Name
-    """
-
-    vmd_str += """
-    mol selection { not water}
-    mol material Opaque
-    mol addrep top
-    mol selupdate 3 top 0
-    mol colupdate 3 top 0
-    mol scaleminmax top 3 0.000000 0.000000
-    mol smoothrep top 3 0
-    """
-
-    vmd_str += """
-    mol drawframes top 3 {now}
-    """
-
-    vmd_str += "mol rename top {}".format(Path(pdb_file).name)
-    vmd_str += """
-    lappend viewplist [molinfo top]
-    set topmol [molinfo top]
-    # done with molecule 0
-    foreach v $viewplist {
-      molinfo $v set {center_matrix rotate_matrix scale_matrix global_matrix} $viewpoints($v)
-    }
-    foreach v $fixedlist {
-      molinfo $v set fixed 1
-    }
-    unset viewplist
-    unset fixedlist
-    mol top $topmol
-    unset topmol
-
-    label textsize 1.0
-    pbc wrap -center com -centersel "protein" -compound residue -all 
-    pbc wrap -center com -centersel "protein" -compound residue -all 
-    """
-    #return vmd_str + vmd_str1 + vmd_str2 + vmd_str3 + vmd_str4 + vmd_str5 + vmd_str6
-    return vmd_str
-    
 
 if __name__ == "__main__":
     #First, get the openduck values 

@@ -26,3 +26,10 @@ md_length : 0.5
 wqb_threshold : 6
 init_velocities : 0.00001
 init_distance : 2.5
+HMR : False
+
+# Execution options
+precision : mixed
+trajectory_interval : 4
+force_constant_chunk : 1.0
+smd_spring_constant : 50

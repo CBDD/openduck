@@ -5,3 +5,6 @@ test/*
 build
 dist
 openduck.egg-info
+__pycache__/
+.pytest_cache/
+openduck_smoke_test/

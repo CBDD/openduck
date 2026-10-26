@@ -1,26 +1,20 @@
 {% set name = "duck" %}
-{% set version = "0.1.4" %}
+{% set version = "0.3.0" %}
 
 package:
   name: openduck
   version: {{ version }}
 
 source:
-  url: https://github.com/galaxycomputationalchemistry/{{ name }}/archive/refs/heads/master.tar.gz
-  # url: https://github.com/galaxycomputationalchemistry/{{ name }}/archive/v{{ version }}.tar.gz
-  # sha256: 5ee0cae33c07a3c0277d7db5a0c7a7f2bcd65752a54c3910edb6fcc64623dfc2
+  url: https://github.com/CBDD/openduck/archive/refs/heads/master.tar.gz
 
 build:
   number: 0
   noarch: python
   script: "{{ PYTHON }} -m pip install . -vv"
   entry_points:
-    - get_wqb = scripts.get_wqb:main
-    - duck_chunk=scripts.duck_chunk:main
-    - duck_prepare_sys=scripts.duck_prepare_sys:main
-    - duck_prepare_sys_for_amber=scripts.duck_prepare_sys_for_amber:main
-    - duck_smd_runs=scripts.duck_smd_runs:main
-    # TODO: add full set of scripts when known
+    - openduck = scripts.openduck:main
+    - openmm_job_launcher = scripts.openmm_job_launcher:main
 requirements:
   host:
     - python
@@ -38,15 +32,17 @@ requirements:
     - openmm=7.5
     - openmmforcefields=0.9.0
     - ambertools=22.0
-    - seaborn
+    - pandas
+    - scipy
+    - matplotlib
+    - pyyaml
 
 test:
   commands:
-    - duck_smd_runs -h
-    - duck_prepare_sys -h
-    - duck_prepare_sys_for_amber -h
-    - duck_chunk -h
-    - get_wqb -h
+    - openduck -h
+    - openduck openmm-full-protocol -h
+    - openduck amber-prepare -h
+    - openduck report -h
 
 about:
   home: https://github.com/CBDD/openduck

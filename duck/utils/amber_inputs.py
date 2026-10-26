@@ -1,333 +1,232 @@
+"""Generation of AMBER inputs and queue scripts for the AMBER DUck protocol.
+
+Templates live in ``duck/templates/amber_inputs`` (pmemd inputs and NMR restraint files) and
+``duck/templates/queueing_templates`` (job scripts). The protocol is minimisation, heating to
+300 K in four 100 ps steps, 1 ns NPT equilibration and then cycles of 0.5 ns MD followed by SMD
+at 300 K and 325 K (``jar=1``), stopping when the WQB falls below the threshold.
+"""
+import glob
 import os
 import shutil
 
-# misc
-def log_result(result):
-    result_list = list() # ?¿?
-    # This is called whenever foo_pool(i) returns a result.
-    # result_list is modified only by the main process, not the pool workers.
-    result_list.append(result)
+from duck.utils.resources import data_path
 
-# handle raised errors
+# Residues excluded from the chunk restraint mask (solvent, ligand and bulk ions)
+NON_CHUNK_RESIDUES = ('WAT', 'HOH', 'UNL', 'NA', 'CL')
+
+
 def handle_error(error):
-	print(error, flush=True)
+    """Error callback for multiprocessing pools: print the error instead of failing silently."""
+    print(error, flush=True)
 
-def write_string_to_file(file,string):
+
+def write_string_to_file(file, string):
     with open(file, 'w') as fh:
         fh.write(string)
 
+
 def ligand_string_generator(file):
+    """Yield the molecule blocks (including the ``$$$$`` delimiter) of a multi-molecule SD file."""
     with open(file) as fh:
         mol = []
         for line in fh:
-            line=line.rstrip()
+            line = line.rstrip()
             mol.append(line)
             if line == '$$$$':
-                new_mol = mol
+                yield '\n'.join(mol)
                 mol = []
-                yield '\n'.join(new_mol)
-                
+        if any(x.strip() for x in mol):  # last molecule without a trailing delimiter
+            yield '\n'.join(mol + ['$$$$'])
+
+
+def residue_ranges(numbers):
+    """Compact a list of residue numbers into an AMBER mask range string, e.g. [1, 2, 3, 5] -> '1-3,5'."""
+    ranges = []
+    for number in sorted(set(int(x) for x in numbers)):
+        if ranges and number == ranges[-1][1] + 1:
+            ranges[-1][1] = number
+        else:
+            ranges.append([number, number])
+    return ','.join(str(a) if a == b else f'{a}-{b}' for a, b in ranges)
+
+
 class Queue_templates(object):
     """
-    A class to create queue files for Amber simulations.
+    Create the job script that runs the AMBER DUck protocol.
 
-Attributes:
-
-    wqb_threshold (float): A threshold value for WQB (quasi bond work) used in simulations.
-    replicas (int): The number of replicas to be used in simulations.
-    hmr (bool): A boolean indicating if simulations are using HMR (Hydrogen Mass Repartitioning).
-    array_limit (bool): A boolean indicating if the queue file should be generated with an array template.
-    top (str): A string representing the topology file name used in simulations.
-    queue_dir (str): A string representing the directory path of the queue templates.
-    commands_string (str): A string representing the command line arguments used in simulations.
-    functions_string (str): A string representing the Python functions used in simulations.
-
-Methods:
-
-    write_string_to_file(file, string): Writes a given string to a file with the given file name.
-    copy_getWqbValues_script(): Copies the getWqbValues.py script from the queue templates directory to the current working directory.
-    write_queue_file(kind): Generates a queue file with the given kind (template) and writes it to disk.
+    Attributes:
+        wqb_threshold (float): WQB below which the run is stopped.
+        replicas (int): number of MD/SMD cycles.
+        hmr (bool): use the HMR topology.
+        array_limit (int or bool): number of ligands for array jobs (False for a single job).
+        top (str): topology file name used in the simulations.
+        queue_dir (str): directory of the queue templates.
+        commands_string (str): protocol commands inserted in the template.
+        functions_string (str): bash functions inserted in the template.
     """
+
     def __init__(self, wqb_threshold=0, replicas=20, hmr=True, array_limit=False, keep_intermediate_files=False):
         '''
-        Initialize the Queue_templates class.
-
         Args:
-            wqb_threshold (float): A threshold value for WQB (quasi bond work) used in simulations.
-            replicas (int): The number of replicas to be used in simulations.
-            hmr (bool): A boolean indicating if simulations are using HMR (Hydrogen Mass Repartitioning).
-            array_limit (bool): A boolean indicating if the queue file should be generated with an array template.
-        '''        
+            wqb_threshold (float): WQB below which the run is stopped.
+            replicas (int): number of MD/SMD cycles.
+            hmr (bool): use ``HMR_system_complex.prmtop``.
+            array_limit (int or bool): number of array tasks, or False for a single job.
+            keep_intermediate_files (bool): if False, the job deletes everything except the inputs,
+                restraint files and SMD reports (``*.dat``) at the end.
+        '''
         self.wqb_threshold = wqb_threshold
         self.replicas = replicas
         self.hmr = hmr
         self.array_limit = array_limit
-        
-        if hmr: self.top = 'HMR_system_complex.prmtop'
-        else: self.top = 'system_complex.prmtop'
-        
-        self.queue_dir = self._get_queue_templates_dir()
+        self.top = 'HMR_system_complex.prmtop' if hmr else 'system_complex.prmtop'
+        self.queue_dir = data_path('templates', 'queueing_templates')
         self.commands_string = self._get_commands_string()
         if not keep_intermediate_files:
-            self.commands_string += '\nfind -type f ! -regex ".*\(dat\|prmtop\|inpcrd\|in\|dist.*rst\|yaml\)$" -delete\n'
+            self.commands_string += '\nfind -type f ! -regex ".*\\(dat\\|prmtop\\|inpcrd\\|in\\|dist.*rst\\|yaml\\)$" -delete\n'
         self.functions_string = self._get_functions_string()
-    
-    def _get_queue_templates_dir(self):
-        '''
-        Private method to obtain queue template directories
-        '''
-        import duck
-        p = os.path.abspath(duck.__path__[0])
-        return os.path.join(p, 'templates', 'queueing_templates')
-    
+
     def _read_template(self, file):
-        '''
-        Private method to read template files
-        '''
-        file_path = os.path.join(self.queue_dir, file)
-        with open(file_path) as f:
-            file_string = f.read()
-        return file_string
-    
+        with open(os.path.join(self.queue_dir, file)) as f:
+            return f.read()
+
     def _get_commands_string(self):
-        '''
-        Private method to read command template files
-        '''
         cmd_template = self._read_template('commands.txt')
-        return cmd_template.format(replicas=self.replicas, wqb_threshold = self.wqb_threshold, top = self.top, i='{i}')
-    
+        return cmd_template.format(replicas=self.replicas, wqb_threshold=self.wqb_threshold, top=self.top, i='{i}')
+
     def _get_functions_string(self):
-        '''
-        Private method to read function template files
-        '''
         funct_template = self._read_template('functions.txt')
         return funct_template.format(top=self.top, nu='{nu}', wqb_limit='{wqb_limit}')
-    
-    def write_string_to_file(self, file,string):
-        '''
-        Utils method to write strings to a file.
-        '''
-        with open(file, 'w') as fh:
-            fh.write(string)
+
+    def write_string_to_file(self, file, string):
+        write_string_to_file(file, string)
+
     def copy_getWqbValues_script(self):
-        '''
-        Utils method to copy the Wqb Analysis script to desired location.
-        '''
+        '''Copy the standalone WQB script used by the job to stop early.'''
         shutil.copyfile(os.path.join(self.queue_dir, 'getWqbValues.py'), 'getWqbValues.py')
-    
+
     def write_queue_file(self, kind):
         '''
-        Generates a queue file with the given kind (template) and writes it to disk.
+        Write ``duck_queue.q`` (or ``duck_array_queue.q`` for array jobs) from the ``kind`` template.
+
+        Templates are ``{kind}.q`` and ``{kind}_array.q`` in the queueing templates directory
+        (local, Slurm, SGE are provided).
         '''
-        import glob
-        if not self.array_limit and len(glob.glob(self.queue_dir+f'/{kind}.q')) == 0:
-            raise ValueError(f'{kind} is not a stored queue template.')
-        elif self.array_limit and len(glob.glob(self.queue_dir+f'/{kind}_array.q')) == 0:
-            raise ValueError(f'{kind} is not a stored queue template or does not have an array template.')
+        template = f'{kind}_array.q' if self.array_limit else f'{kind}.q'
+        if not glob.glob(os.path.join(self.queue_dir, template)):
+            raise ValueError(f'{kind} is not a stored queue template'
+                             + (' or does not have an array template.' if self.array_limit else '.'))
+        que_templ = self._read_template(template)
         if self.array_limit:
-            que_templ = self._read_template(os.path.join(self.queue_dir, f'{kind}_array.q'))
-            self.write_string_to_file('duck_array_queue.q', que_templ.format(array_limit = self.array_limit, functions=self.functions_string, commands=self.commands_string))
+            self.write_string_to_file('duck_array_queue.q', que_templ.format(
+                array_limit=self.array_limit, functions=self.functions_string, commands=self.commands_string))
         else:
-            que_templ = self._read_template(os.path.join(self.queue_dir, f'{kind}.q'))
-            self.write_string_to_file('duck_queue.q', que_templ.format(functions=self.functions_string, commands=self.commands_string))
+            self.write_string_to_file('duck_queue.q', que_templ.format(
+                functions=self.functions_string, commands=self.commands_string))
         self.copy_getWqbValues_script()
-        
+
+
 class Amber_templates(object):
     """
-    A class to create input files for Amber simulations.
+    Create the pmemd input files of the AMBER DUck protocol.
 
-    Attributes
-    ----------
-    structure (str): A path to the input structure file.
-    interaction (tuple): A tuple containing the indices of the interacting protein and ligand atoms, and the average distance between them.
-    hmr (bool): If True, use the Hydrogen Mass Repartitioning (HMR) technique.
-    seed (str), optional: A seed to use for the simulations. Default is '-1'.
-
-    Methods
-    -------
-    extract_residuenumbers(structure)
-        Extracts the residue numbers of all protein and ligand residues from a given structure.
-    write_md_inputs()
-        Writes input files for the minimization, heating, equilibration, and production phases of a
-        molecular dynamics simulation.
-    write_smd_inputs()
-        Writes input files for the steered molecular dynamics simulation.
+    Attributes:
+        structure (parmed.Structure): prepared system (residue indices define the AMBER masks).
+        interaction (tuple): (protein atom index, ligand atom index, distance), 0-based indices.
+        hmr (bool): use a 4 fs time step (same simulated times).
+        seed (str): random seed (``ig``), -1 for a random one.
+        chunk_residues (str): mask range of the restrained (chunk) residues.
+        water_mask (str): extra mask for restrained structural waters ('' if none).
     """
-    def __init__(self, structure, interaction, hmr, seed = '-1', waters_masked = None):
-        '''
-        Initialize the Amber_templates class.
 
+    def __init__(self, structure, interaction, hmr, seed='-1', waters_masked=None):
+        '''
         Args:
-           structure (str): A path to the input structure file.
-           interaction (tuple): A tuple containing the indices of the interacting protein and ligand atoms, and the average distance between them.
-           hmr (bool): If True, use the Hydrogen Mass Repartitioning (HMR) technique.
-           seed (str), optional: A seed to use for the simulations. Default is '-1'.
-        ''' 
+            structure (parmed.Structure): prepared system.
+            interaction (tuple): (protein atom index, ligand atom index, distance), 0-based indices.
+            hmr (bool): use a 4 fs time step.
+            seed (str): random seed for pmemd, '-1' for a random one.
+            waters_masked (int, optional): number of (retained) waters, counted from the first one, to restrain.
+        '''
         self.structure = structure
         self.interaction = interaction
         self.hmr = hmr
         self.seed = seed
-        
-        self.templates_dir = self._get_amber_templates_dir()
+        self.templates_dir = data_path('templates', 'amber_inputs')
         self.chunk_residues = self.extract_residuenumbers(structure)
         self.water_mask = self.get_restrained_waters_mask(structure, waters_masked)
 
-    def _get_amber_templates_dir(self):
-        '''
-        A private method that returns the path to the Amber templates directory.
-        '''
-        import duck
-        p = os.path.abspath(duck.__path__[0])
-        return os.path.join(p, 'templates', 'amber_inputs')
-    
-    def write_string_to_file(self, file,string):
-        '''
-        Writes a given string to a file with the given name.
-        '''
-        with open(file, 'w') as fh:
-            fh.write(string)
-            
+    def write_string_to_file(self, file, string):
+        write_string_to_file(file, string)
+
     def _read_template(self, file):
-        '''
-        A private method that reads a given template file and returns its contents as a string.
-        '''
-        file_path = os.path.join(self.templates_dir, file)
-        with open(file_path) as f:
-            file_string = f.read()
-        return file_string
-    
-    def extract_residuenumbers(self,  structure):
-        r_id = []
-        for r in structure.residues:
-            if r.name != 'WAT' and r.name != 'UNL' and r.name != 'NA' and r.name != 'CL':
-                r_id.append(int(r.number)+1)
-        chunk_residues = self._re_range(r_id)
-        return chunk_residues
-    
-    def get_restrained_waters_mask(self, structure, nwaters = 0):
+        with open(os.path.join(self.templates_dir, file)) as f:
+            return f.read()
+
+    def extract_residuenumbers(self, structure):
+        '''AMBER mask range (1-based residue indices of the topology) of all non-solvent, non-ligand residues.'''
+        return residue_ranges(r.idx + 1 for r in structure.residues if r.name not in NON_CHUNK_RESIDUES)
+
+    def get_restrained_waters_mask(self, structure, nwaters=0):
+        '''Mask addition (``| :ranges``) restraining the first ``nwaters`` waters (the retained ones), or ''.'''
         if not nwaters:
             return ''
-        waters_to_mask = []
-        for r in structure.residues:
-            if r.name == 'WAT' or r.name == 'HOH':
-                waters_to_mask.append(int(r.number)+1)
-                if len(waters_to_mask) == nwaters:
-                    break
-        water_residues = self._re_range(waters_to_mask)
-        return f'| :{water_residues}'
+        waters = [r.idx + 1 for r in structure.residues if r.name in ('WAT', 'HOH')][:nwaters]
+        return f'| :{residue_ranges(waters)}'
 
     def _re_range(self, lst):
-        '''
-        A private method that converts a list of numbers into a string of ranges.
-        '''
-        # from here https://stackoverflow.com/questions/9847601/convert-list-of-numbers-to-string-ranges
-        # not sure if it works super well!!!!
-        n = len(lst)
-        result = []
-        scan = 0
-        while n - scan > 2:
-            step = 1
-            if lst[scan + 2] - lst[scan + 1] != step:
-                result.append(str(lst[scan]))
-                scan += 1
-                continue
+        '''Convert a list of numbers into a string of ranges (kept for backward compatibility).'''
+        return residue_ranges(lst)
 
-            for j in range(scan+2, n-1):
-                if lst[j+1] - lst[j] != step:
-                    result.append('{}-{}'.format(lst[scan], lst[j]+1))
-                    scan = j+1
-                    break
-            else:
-                result.append('{}-{}'.format(lst[scan], lst[n-1]))
-                return ','.join(result)
-        if n - scan == 1:
-            result.append(str(lst[scan]))
-        elif n - scan == 2:
-            result.append(','.join(map(str, lst[scan:])))
-        return ','.join(result)
-        
     def write_md_inputs(self):
         '''
-        method to generate the input files for Amber molecular dynamics simulations.
-        It generates the following input files:
-           1_min.in: minimization input file.
-           2_heating150.in, 2_heating200.in, 2_heating250.in, 2_heating300.in: heating input files.
-           3_eq.in: equilibration input file.
-           md.in: production MD input file.
-           dist_md.rst: restraint file for distance between the protein and ligand.
+        Write the inputs for minimisation (1_min.in), heating (2_heating150/200/250/300.in),
+        equilibration (3_eq.in), production MD (md.in) and the MD H-bond restraint (dist_md.rst).
         '''
-        # min
-        min_template = self._read_template('min.in')
-        self.write_string_to_file('1_min.in', min_template.format(chunk_residues=self.chunk_residues, water_mask=self.water_mask))
-        
-        # heating
-        init_heating_template = self._read_template('first_heating.in')
-        self.write_string_to_file('2_heating150.in', init_heating_template.format(chunk_residues=self.chunk_residues, water_mask=self.water_mask, seed =self.seed ))
-        
-        heating_templates = self._read_template('heating.in')
-        self.write_string_to_file('2_heating200.in', heating_templates.format(chunk_residues=self.chunk_residues, water_mask=self.water_mask, seed =self.seed, temp='200.0'))
-        self.write_string_to_file('2_heating250.in', heating_templates.format(chunk_residues=self.chunk_residues, water_mask=self.water_mask, seed =self.seed, temp='250.0'))
-        self.write_string_to_file('2_heating300.in', heating_templates.format(chunk_residues=self.chunk_residues, water_mask=self.water_mask, seed =self.seed, temp='300.0'))
+        masks = dict(chunk_residues=self.chunk_residues, water_mask=self.water_mask)
+        self.write_string_to_file('1_min.in', self._read_template('min.in').format(**masks))
+        self.write_string_to_file('2_heating150.in', self._read_template('first_heating.in').format(
+            seed=self.seed, **masks))
+        heating_template = self._read_template('heating.in')
+        for temp in ('200.0', '250.0', '300.0'):
+            self.write_string_to_file(f'2_heating{temp[:3]}.in', heating_template.format(
+                seed=self.seed, temp=temp, **masks))
 
-        # to maintain the same simulation times despite hmr
-        if self.hmr:
-            time_step = '0.004'
-            iterations= '250000'
-        else:
-            time_step = '0.002'
-            iterations='500000'
-        
-        # equilibration
-        equilibration_template = self._read_template('equilibration.in')
-        self.write_string_to_file('3_eq.in', equilibration_template.format(chunk_residues=self.chunk_residues, water_mask=self.water_mask, seed =self.seed, time_step=time_step, iterations=iterations))
+        # same simulated times with and without HMR
+        time_step, iterations = ('0.004', '250000') if self.hmr else ('0.002', '500000')
+        self.write_string_to_file('3_eq.in', self._read_template('equilibration.in').format(
+            seed=self.seed, time_step=time_step, iterations=iterations, **masks))
+        self.write_string_to_file('md.in', self._read_template('md.in').format(
+            seed=self.seed, time_step=time_step, iterations=iterations, **masks))
 
-        # production
-        md_template = self._read_template('md.in')
-        self.write_string_to_file('md.in', md_template.format(chunk_residues=self.chunk_residues, water_mask=self.water_mask, seed=self.seed, time_step=time_step, iterations=iterations))
-        
-        # disang
-        prot_idx, lig_idx, pairmeandistance_i = self.interaction
-        md_dist_template = self._read_template('dist_md.rst')
-        self.write_string_to_file('dist_md.rst', md_dist_template.format(prot_idx= prot_idx+1, lig_idx=lig_idx+1))
-    
+        prot_idx, lig_idx = self.interaction[0], self.interaction[1]
+        self.write_string_to_file('dist_md.rst', self._read_template('dist_md.rst').format(
+            prot_idx=prot_idx + 1, lig_idx=lig_idx + 1))
+
     def write_smd_inputs(self):
         '''
-        method to generate the input files for Amber steered molecular dynamics simulations.
-        It generates the following input files:
-           duck.in: SMD input file for simulations at 300K.
-           duck_325K.in: SMD input file for simulations at 325K.'''
-        # to maintain the same simulation times despite hmr and the smd report number
-        if self.hmr:
-            time_step = '0.004'
-            iterations = '125000'
-            savefreq = '25'
-        else:
-            time_step = '0.002'
-            iterations = '250000'
-            savefreq = '50'
-        
-        # smd
+        Write the SMD inputs at 300 K (duck.in) and 325 K (duck_325K.in) and the steering restraint (dist_duck.rst).
+        '''
+        # same simulated time (500 ps) and number of reported points (5000) with and without HMR
+        time_step, iterations, savefreq = ('0.004', '125000', '25') if self.hmr else ('0.002', '250000', '50')
         smd_template = self._read_template('smd.in')
-        self.write_string_to_file('duck.in', smd_template.format(temp='300.0', chunk_residues=self.chunk_residues, water_mask=self.water_mask, seed=self.seed, time_step=time_step, iterations=iterations, savefreq=savefreq))
-        self.write_string_to_file('duck_325K.in', smd_template.format(temp='325.0', chunk_residues=self.chunk_residues, water_mask=self.water_mask, seed=self.seed, time_step=time_step, iterations=iterations, savefreq=savefreq))
+        for file, temp in (('duck.in', '300.0'), ('duck_325K.in', '325.0')):
+            self.write_string_to_file(file, smd_template.format(
+                temp=temp, chunk_residues=self.chunk_residues, water_mask=self.water_mask, seed=self.seed,
+                time_step=time_step, iterations=iterations, savefreq=savefreq))
 
-        # disang
-        prot_idx, lig_idx, pairmeandistance_i = self.interaction
-        duck_dist_template = self._read_template('dist_duck.rst')
-        self.write_string_to_file('dist_duck.rst', duck_dist_template.format(prot_idx= prot_idx+1, lig_idx=lig_idx+1))
-        
+        prot_idx, lig_idx = self.interaction[0], self.interaction[1]
+        self.write_string_to_file('dist_duck.rst', self._read_template('dist_duck.rst').format(
+            prot_idx=prot_idx + 1, lig_idx=lig_idx + 1))
+
     def write_all_inputs(self):
         '''
         Write the md inputs and smd inputs
         '''
         self.write_md_inputs()
         self.write_smd_inputs()
-        
-def copy_getWqbValues_script():
-    import duck
-    base_dir = os.path.abspath(duck.__path__[0])
-    shutil.copyfile(os.path.join(base_dir, 'scripts', 'getWqbValues.py'), 'getWqbValues.py')
-  
-if __name__=='__main__':
+
+
+if __name__ == '__main__':
     queues = Queue_templates(wqb_threshold='7', replicas='8', hmr=True, array_limit=False)
     queues.write_queue_file('local')

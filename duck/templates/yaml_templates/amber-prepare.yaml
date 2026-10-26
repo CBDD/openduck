@@ -2,7 +2,7 @@
 # Main arguments
 interaction : chain_resname_resid_atomname (i.e. A_ASN_140_ND2)
 receptor_pdb : receptor.pdb
-ligand_mol : ligand.mol (it can also be ligand.sdf)
+ligand_mol : ligands.sdf  # MOL or SDF; batch mode requires a multi-ligand SDF
 
 # Chunk
 do_chunk : False

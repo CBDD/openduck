@@ -13,4 +13,8 @@ dependencies:
   - openmm=7.5
   - openmmforcefields=0.9.0
   - ambertools=22.0
-  - seaborn=0.12
+  - pandas
+  - scipy
+  - matplotlib
+  - pyyaml
+  - pytest

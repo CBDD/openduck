@@ -1,30 +1,38 @@
+"""Helpers to inspect DUck SMD trajectories in VMD (used by scripts/duck_analysis_visualisation.py).
+
+Requires MDAnalysis, which is not a dependency of the main OpenDUck workflows.
+"""
+from pathlib import Path
+
 import numpy as np
-import MDAnalysis as mda
+
 
 def get_chunk_residue(original_pdb, chunk_pdb, target_residue_name, target_residue_number):
+    """Map a residue of the original receptor to the chunk residue whose CA is closest to it.
+
+    Returns:
+        tuple: (residue name, residue id) in the chunk.
+    """
+    import MDAnalysis as mda
+    from MDAnalysis.analysis import rms
     pdb_univ = mda.Universe(original_pdb, format='PDB')
     chunk_univ = mda.Universe(chunk_pdb, format='PDB')
 
-    # Get the calpha atom of the pdb target residue:
-    target_res_calpha = pdb_univ.select_atoms(f"resname {target_residue_name} and resnum {target_residue_number} and name CA")[0]
-
-    # Get all the chunk calphas of the same residue type
+    # CA atom of the target residue and all chunk CAs of the same residue type
+    target_res_calpha = pdb_univ.select_atoms(f"resname {target_residue_name} and resnum {target_residue_number} and name CA")
     chunk_resis = chunk_univ.select_atoms(f"resname {target_residue_name} and name CA")
 
-    # Get the distances between the trget calpha and those of the chunk
-    distances = np.array([mda.analysis.rms.rmsd(target_res_calpha.position, chunk_resis[i].position) for i in range(len(chunk_resis))])
-
-    smallest_distance = distances[np.argmin(distances)]
-    if smallest_distance > 0.5:
+    distances = np.array([rms.rmsd(target_res_calpha[0].position, chunk_resis[i].position) for i in range(len(chunk_resis))])
+    if distances[np.argmin(distances)] > 0.5:
         print(f'Alignment for {original_pdb} displaced')
 
     # Target chunk atom should be the closest
-    target_chunk_atom = target_res_calpha(np.argmin(distances))
-
+    target_chunk_atom = chunk_resis[np.argmin(distances)]
     return (target_chunk_atom.resname, target_chunk_atom.resid)
 
 
 def vmd_template(pdb_file, dcd_file, ligand_selection, residue_selection):
+    """Return a VMD state script showing the SMD trajectory with the ligand and the interacting residue."""
     lig_and_res_sel = "{" + ligand_selection + " and (" + residue_selection + ")}"
     ligand_selection = "{"+ ligand_selection + "}"
     residue_selection = "{"+ residue_selection + "}"

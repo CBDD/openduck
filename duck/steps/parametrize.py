@@ -1,15 +1,32 @@
-from simtk.openmm import app
-from rdkit import Chem
-from simtk import unit
-import parmed, pkg_resources
-from simtk import openmm
-from pdbfixer import PDBFixer  # for solvating
+"""Parametrization and solvation of the protein-ligand complex (shared by the OpenMM and AMBER routes).
+
+Steps: ligand parametrization (SMIRNOFF or GAFF2, AM1-BCC charges), receptor parametrization
+with an OpenMM protein force field (plus an optional custom XML, e.g. for cofactors), optional
+structural waters, solvation in a cubic box with PDBFixer, ions (Na+/Cl-) and solvent
+parametrization, and optional hydrogen mass repartitioning (HMR). The result is written as
+``system_complex.prmtop``/``.inpcrd`` (``HMR_system_complex.prmtop`` with HMR) and pickled to
+``complex_system.pickle`` for the OpenMM simulations.
+"""
 import os
-import sys
 import pickle
-from duck.utils.gen_system import generateSMIRNOFFStructureRDK, generateGAFFStructureRDK, generateEspalomaFFStructureRDK
+import sys
 from pathlib import Path
+
+import parmed
+from pdbfixer import PDBFixer
+from rdkit import Chem
+
 from duck.utils.cal_ints import clean_up_files
+from duck.utils.compat import mm, app, unit
+from duck.utils.duck_stuff import apply_hmr
+from duck.utils.gen_system import generateGAFFStructureRDK, generateSMIRNOFFStructureRDK
+from duck.utils.resources import data_path
+
+# ESPALOMA (generateEspalomaFFStructureRDK) is not exposed yet: it is missing from the conda release of
+# openmmforcefields pinned in environment.yaml.
+FF_GENERATORS = {'SMIRNOFF': generateSMIRNOFFStructureRDK, 'GAFF2': generateGAFFStructureRDK}
+WATER_MODELS = ('tip3p', 'spce', 'tip4pew')
+
 
 def find_box_size(input_file="complex.pdb", add_factor=20):
     """
@@ -23,18 +40,28 @@ def find_box_size(input_file="complex.pdb", add_factor=20):
         int: The size (in Angstroms) of the cubic box that can contain the complex.
     """
     complex = parmed.load_file(input_file)
-    x_coords = [x[0] for x in complex.positions]
-    y_coords = [x[1] for x in complex.positions]
-    z_coords = [x[2] for x in complex.positions]
-    x_size = abs(max(x_coords) - min(x_coords))
-    y_size = abs(max(y_coords) - min(y_coords))
-    z_size = abs(max(z_coords) - min(z_coords))
-    val_in_ang = max(x_size, y_size, z_size) + add_factor * unit.angstrom
-    return int(val_in_ang.value_in_unit(unit.angstrom)) + 1
+    coords = complex.coordinates
+    size = max(coords.max(axis=0) - coords.min(axis=0)) + add_factor
+    return int(size) + 1
 
-def prepare_system(ligand_file, protein_file, forcefield_str="amber99sb.xml", water_ff_str = 'tip3p',
-                   hmr=False, small_molecule_ff = 'SMIRNOFF', box_buffer_distance = 10, ionicStrength = 0.1,
-                   waters_to_retain="waters_to_retain.pdb", custom_forcefield=None, fix_ligand_file=False, clean_up=False):
+
+def load_retained_waters(waters_to_retain):
+    """Load the structural waters to keep (residues renamed to HOH), or None if no file is given or it is missing."""
+    if not waters_to_retain or not Path(waters_to_retain).exists():
+        return None
+    print(f'waters retained from {Path(waters_to_retain)}')
+    waters_retained = parmed.load_file(waters_to_retain)
+    for atom in waters_retained:
+        if atom.residue.name != 'HOH':
+            sys.stderr.write(f'Warning: renaming {atom.residue.name}:{atom.name} to HOH:{atom.name}\n')
+            atom.residue.name = 'HOH'
+    return waters_retained
+
+
+def prepare_system(ligand_file, protein_file, forcefield_str="amber99sb.xml", water_ff_str='tip3p',
+                   hmr=False, small_molecule_ff='SMIRNOFF', box_buffer_distance=10, ionicStrength=0.1,
+                   waters_to_retain="waters_to_retain.pdb", custom_forcefield=None, fix_ligand_file=False,
+                   clean_up=False):
     """
     Prepares a protein-ligand system by loading and modifying molecular structures and parameters,
     solvating the system in its water box, and parameterizing ions and solvent using the specified force fields.
@@ -42,179 +69,142 @@ def prepare_system(ligand_file, protein_file, forcefield_str="amber99sb.xml", wa
     Parameters
     ----------
     ligand_file : str
-        The name of the file containing the ligand structure to be prepared.
+        The name of the file containing the ligand structure to be prepared (MOL or SDF).
     protein_file : str
         The name of the file containing the protein structure to be prepared.
     forcefield_str : str, optional
-        The name of the force field file to use for protein and ions parameterization, by default "amber99sb.xml".
+        The OpenMM force field file for the protein, by default "amber99sb.xml".
     water_ff_str : str, optional
-        The name of the force field file to use for water parameterization, by default "tip3p".
+        Water model: tip3p (default), spce or tip4pew.
     hmr : bool, optional
-        Whether to use hydrogen mass repartitioning for simulation, by default False.
+        Whether to apply hydrogen mass repartitioning, by default False.
     small_molecule_ff : str, optional
-        The name of the force field to use for ligand parameterization, by default "SMIRNOFF".
+        The force field to use for ligand parameterization (SMIRNOFF or GAFF2), by default "SMIRNOFF".
     box_buffer_distance : float, optional
-        The buffer distance to use for box creation, in angstroms, by default 10.
+        Minimum distance between the solute and the box edge, in angstroms, by default 10.
     ionicStrength : float, optional
         The ionic strength to use for solvation, by default 0.1 M.
     waters_to_retain : str, optional
-        The name of a PDB file containing the water molecules to retain during solvation, by default "waters_to_retain.pdb".
+        PDB file with structural waters to keep, by default "waters_to_retain.pdb" (ignored if None or missing).
+    custom_forcefield : str, optional
+        Extra OpenMM XML force field (e.g. for cofactors or non-standard residues).
+    fix_ligand_file : bool, optional
+        Add missing hydrogens and fix the charge of tetravalent nitrogens before parametrizing.
+    clean_up : bool, optional
+        Remove the intermediate files.
 
     Returns
     -------
-    parmed.Structure
-        The prepared system structure containing the protein, ligand, solvent, and ions.
-
-    Raises
-    ------
-    Exception
-        If an unsupported small molecule force field is specified or if an unsupported water model is specified.
+    list
+        ``[parmed.Structure]`` with the prepared protein, ligand, ions and solvent.
     """
-    #Do not put ESPALOMA yet, as it is not on the conda release of openmmforcefields yet, The function is already prepared
-    #FF_generators = {'SMIRNOFF': generateSMIRNOFFStructureRDK, 'GAFF2': generateGAFFStructureRDK, 'ESPALOMA': generateEspalomaFFStructureRDK}
-    FF_generators = {'SMIRNOFF': generateSMIRNOFFStructureRDK, 'GAFF2': generateGAFFStructureRDK}
-    available_water_models = ['tip3p', 'spce','tip4pew']
-    #Sanity checks
-    if small_molecule_ff.upper() not in FF_generators:
+    if small_molecule_ff.upper() not in FF_GENERATORS:
         print(f'{small_molecule_ff} is not in the accepted small molecule forcefields. Defaulting it to SMIRNOFF')
         small_molecule_ff = 'SMIRNOFF'
-    if water_ff_str not in available_water_models:
-        print(f'{water_ff_str} is not available in the openmm data files. Defaulting to tip3p.xml')
-        water_ff_str = 'tip3p.xml'
+    if water_ff_str not in WATER_MODELS:
+        print(f'{water_ff_str} is not an available water model {WATER_MODELS}. Defaulting to tip3p')
+        water_ff_str = 'tip3p'
 
     print("Preparing ligand")
     if fix_ligand_file:
-        fixed_ligand_file = ligand_file.replace(os.path.basename(ligand_file), f"fixed_{os.path.basename(ligand_file)}")
+        fixed_ligand_file = os.path.join(os.path.dirname(ligand_file), f"fixed_{os.path.basename(ligand_file)}")
         fix_ligand(ligand_file, fixed_ligand_file)
         ligand_file = fixed_ligand_file
-    ligand_pmd = FF_generators[small_molecule_ff.upper()](ligand_file)
-    print("Fixing protein")
-    protein = parmed.load_file(protein_file)
-    protein.write_pdb("fixed.pdb")
-    print("loading system")
-   # protein = parmed.load_file("fixed.pdb")["!(:HOH,NA,CL)"]  # remove ions and water
-    protein = parmed.load_file("fixed.pdb")  # don't remove ions and water
-    print(f'Loading custom forcefield {custom_forcefield}')
+    ligand_pmd = FF_GENERATORS[small_molecule_ff.upper()](ligand_file)
+
+    print("Preparing protein")
+    parmed.load_file(protein_file).write_pdb("fixed.pdb")
+    protein = parmed.load_file("fixed.pdb")  # ions and waters in the receptor file are kept
     if custom_forcefield:
+        print(f'Loading custom forcefield {custom_forcefield}')
         forcefield = app.ForceField(forcefield_str, custom_forcefield)
     else:
         forcefield = app.ForceField(forcefield_str)
     protein_system = forcefield.createSystem(protein.topology)
-    protein_pmd = parmed.openmm.load_topology(
-        protein.topology, protein_system, protein.positions
-    )
+    protein_pmd = parmed.openmm.load_topology(protein.topology, protein_system, protein.positions)
     protein_pmd.save("protein_prepared.pdb", overwrite=True)
-    if Path(waters_to_retain).exists():
-        print(f'waters retained from {Path(waters_to_retain)}')
-        waters_retained = parmed.load_file(waters_to_retain)
-        #check if waters are well named
-        for atom in waters_retained:
-            if atom.residue.name != 'HOH':
-                sys.stderr.write(f'Warning: renaming {atom.residue.name}:{atom.name} to HOH:{atom.name}\n')
-                atom.residue.name = 'HOH'
+    waters_retained = load_retained_waters(waters_to_retain)
+    if waters_retained is not None:
         prot_lig_pmd = protein_pmd + ligand_pmd + waters_retained
     else:
         prot_lig_pmd = protein_pmd + ligand_pmd
     prot_lig_pmd.save("complex.pdb", overwrite=True)
-    print("Solvation")
-    fixer = PDBFixer("complex.pdb")
-    # 0.1 in Vec3 because box_size is in angstrom and fixer uses nanometer
-    # scaling factor to somehow ensure no interaction with periodic image
-    
-    box_scaling_factor = 1.0
-    # ionicStrength = 0.1 M
-    # box_buffer_disance = 10
 
-    # use the add factor as the buffer distance specified in tleap, og DUck protocol specified 18A
-    box_size = find_box_size("complex.pdb",add_factor=box_buffer_distance*2) 
-    fixer.addSolvent(
-        box_scaling_factor * box_size * openmm.Vec3(0.1, 0.1, 0.1),
-        positiveIon="Na+",
-        negativeIon="Cl-",
-        ionicStrength=ionicStrength * unit.molar,
-    )
-    # fix to use app.modeller water models, its not very pretty
-    #for r in fixer.topology.residues():
-    #    if r.name == 'HOH':
-    #        r.name = 'WAT'
-    app.PDBFile.writeFile(
-        fixer.topology, fixer.positions, open("complex_solvated.pdb", "w")
-    )
+    print("Solvation")
+    # Cubic box: largest solute dimension plus the buffer on both sides (the original DUck protocol used 18 A)
+    box_size = find_box_size("complex.pdb", add_factor=box_buffer_distance * 2)
+    fixer = PDBFixer("complex.pdb")
+    fixer.addSolvent(box_size * mm.Vec3(0.1, 0.1, 0.1),  # A -> nm
+                     positiveIon="Na+", negativeIon="Cl-", ionicStrength=ionicStrength * unit.molar)
+    with open("complex_solvated.pdb", "w") as fh:
+        app.PDBFile.writeFile(fixer.topology, fixer.positions, fh)
     print("Solvation done")
+
     print("Parametrizing ions")
     complex = parmed.load_file("./complex_solvated.pdb")
     ions = complex["(:NA,CL)"]
-    ions_forcefield = app.ForceField('amber99sb.xml')
-    ions_system = ions_forcefield.createSystem(ions.topology)
+    ions_system = app.ForceField('amber99sb.xml').createSystem(ions.topology)
     ions_pmd = parmed.openmm.load_topology(ions.topology, ions_system, ions.positions)
-    print("Parametrizing ions done")
+
     print(f"Parametrizing solvent using {water_ff_str}")
     solvent = complex["(:HOH)"]
-    num_solvent = len(solvent.residues)
-    prm_top_water_path = pkg_resources.resource_filename(
-        'duck',f'parameters/waters/{water_ff_str}.prmtop'
-    )
-    solvent_pmd = parmed.load_file(prm_top_water_path)
-    solvent_pmd *= num_solvent
-    if water_ff_str == 'tip4pew': # tip4p uses an extra atom, so we need to generate the positions for this extra atom
-        wat_forcefield = app.ForceField(f'{water_ff_str}.xml')
+    solvent_pmd = parmed.load_file(data_path('parameters', 'waters', f'{water_ff_str}.prmtop'))
+    solvent_pmd *= len(solvent.residues)
+    if water_ff_str == 'tip4pew':  # TIP4P-Ew has an extra virtual site whose positions need to be generated
         modeller = app.Modeller(solvent.topology, solvent.positions)
-        modeller.addExtraParticles(wat_forcefield)
-        solvent_pmd.positions=modeller.positions
+        modeller.addExtraParticles(app.ForceField(f'{water_ff_str}.xml'))
+        solvent_pmd.positions = modeller.positions
     else:
-        solvent_pmd.positions=solvent.positions
-    #solvent_system = wat_forcefield.createSystem(modeller.topology)
-    #solvent_pmd = parmed.openmm.load_topology(modeller.topology, solvent_system, modeller.positions)
-    print("Parametrizing solvent done")
-    print("merge structures")
+        solvent_pmd.positions = solvent.positions
+
+    print("Merging structures")
     combined_pmd = protein_pmd + ligand_pmd + ions_pmd + solvent_pmd
-    #combined_pmd.get_box()
     combined_pmd.box_vectors = complex.box_vectors
     combined_pmd.save("system_complex.prmtop", overwrite=True)
     combined_pmd.save("system_complex.inpcrd", overwrite=True)
     if hmr:
         print('Performing Hydrogen Mass Repartition')
-        hmass_action = parmed.tools.actions.HMassRepartition(combined_pmd)
-        hmass_action.execute()
+        apply_hmr(combined_pmd)
         combined_pmd.save('HMR_system_complex.prmtop', overwrite=True)
 
-    print("merge done")
-    print("writing pickle")
-    complex = "./complex_system.pickle"
-    pickle_out = open(complex, "wb")
-    pickle.dump([combined_pmd], pickle_out)
-    pickle_out.close()
+    print("Writing pickle")
+    with open("./complex_system.pickle", "wb") as fh:
+        pickle.dump([combined_pmd], fh)
     if clean_up:
         print('Removing intermediate files')
-        # a list of generated files to remove, so we don't delete the files that were in the directory beforehand.
-        files_to_delete = ['complex_solvated.pdb', 'fixed.pdb', 'complex.pdb', 'run.tleap', 'indice.text', 'no_buffer_altlocs.pdb', 'leap.log',
-                           'protein_out.pdb', 'protein_out_no_ace_nme.pdb', 'protonated_protein_out.pdb', 'ligand.pdb', ligand_file.split('.')[0]+'.pdb',
+        # Only files generated here, so files that were in the directory beforehand are not deleted.
+        # ligand.pdb is kept: the SDF reports use it.
+        files_to_delete = ['complex_solvated.pdb', 'fixed.pdb', 'complex.pdb', 'run.tleap', 'indice.text',
+                           'no_buffer_altlocs.pdb', 'leap.log', 'protein_out.pdb', 'protein_out_no_ace_nme.pdb',
+                           'protonated_protein_out.pdb',
+                           os.path.splitext(os.path.basename(ligand_file))[0] + '.pdb',
                            'protein_prepared.pdb', 'chunk_leap.log']
-        clean_up_files(files_to_delete=files_to_delete)
+        clean_up_files(files_to_delete=[f for f in files_to_delete if f != 'ligand.pdb'])
     return [combined_pmd]
+
 
 def fix_ligand(ligand_file, fixed_ligand_file):
     """
-    Add explicit hydrogens to carbon atoms and ensure tetravalent nitrogens are assigned a +1 charge
+    Add explicit hydrogens to the ligand and ensure tetravalent nitrogens are assigned a +1 charge.
+
+    Args:
+        ligand_file (str): input MOL/SDF file (first molecule is used).
+        fixed_ligand_file (str): output SDF file.
     """
     with Chem.SDMolSupplier(ligand_file, sanitize=False) as supplier:
         mol = supplier[0]
-    chem_problems = Chem.DetectChemistryProblems(mol)
-    for chem_problem in chem_problems:
+    for chem_problem in Chem.DetectChemistryProblems(mol):
         if chem_problem.GetType() == 'AtomValenceException':
             atom = mol.GetAtomWithIdx(chem_problem.GetAtomIdx())
             if atom.GetSymbol() == 'N' and atom.GetFormalCharge() == 0 and atom.GetExplicitValence() == 4:
                 atom.SetFormalCharge(1)
     Chem.SanitizeMol(mol)
     fixed_mol = Chem.AddHs(mol, addCoords=True)
-    sdwriter = Chem.SDWriter(fixed_ligand_file)
-    sdwriter.write(fixed_mol)
-    sdwriter.close()
+    with Chem.SDWriter(fixed_ligand_file) as sdwriter:
+        sdwriter.write(fixed_mol)
+
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
         sys.exit("USAGE : python parametrize.py protein.pdb ligand.mol\n")
-    ligand_file = sys.argv[2]
-    protein_file = sys.argv[1]
-    system = prepare_system(ligand_file, protein_file, hmr=True, water_ff_str='tip3p.xml')
-
+    prepare_system(sys.argv[2], sys.argv[1], hmr=True, water_ff_str='tip3p')
