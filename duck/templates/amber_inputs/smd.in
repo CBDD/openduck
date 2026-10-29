@@ -1,4 +1,4 @@
-# Steered simulation from 2.5 to 5 A for DUck
+# Steered MD from 2.5 to 5 A for DUck (0.5 ns, 5 A/ns)
 &cntrl
 ntx = 5, irest=1,
 iwrap=1,

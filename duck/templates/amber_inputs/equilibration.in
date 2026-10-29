@@ -1,4 +1,4 @@
-# Constant preasure EQUILIBRATION
+# Constant pressure EQUILIBRATION (1 ns)
 &cntrl
 imin=0,
 ntx=5, irest=1,

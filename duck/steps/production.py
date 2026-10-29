@@ -31,6 +31,7 @@ Output files (unchanged names): ``md_{i}.{chk,csv,pdb,dcd}`` and ``smd_{i}_{T}.{
 The ``.dat`` files use the AMBER ``jar=1`` DUMPAVE layout: ``r0 (A)  r (A)  force (kcal/mol/A)
 work (kcal/mol)``.
 """
+import csv
 import os
 import time
 from pathlib import Path
@@ -161,9 +162,17 @@ class DuckSimulation:
         self._device_index = properties.get('DeviceIndex')
         self.simulation = app.Simulation(structure.topology, system, self.integrator, platform, properties)
         self.context = self.simulation.context
+        self.timings = []  # one record per run_md / run_smd call (phase, temperature, simulated_ps, wall_s)
         if structure.box_vectors is not None:
             self.context.setPeriodicBoxVectors(*structure.box_vectors)
         self.context.setPositions(structure.positions)
+
+    def device_name(self):
+        """Name of the GPU (or the platform name on the CPU)."""
+        platform = self.context.getPlatform()
+        if 'DeviceName' in platform.getPropertyNames():
+            return platform.getPropertyValue(self.context, 'DeviceName')
+        return platform.getName()
 
     @staticmethod
     def _parameter_value(system, name):
@@ -265,6 +274,7 @@ class DuckSimulation:
         start = time.time()
         self.simulation.step(n_steps)
         elapsed = time.time() - start
+        self.timings.append(dict(phase='md', temperature=temperature, simulated_ps=n_steps * self.dt, wall_s=elapsed))
         self._finish_phase(pdb_file, checkpoint_file)
         print(f'  MD {length_ns:g} ns at {temperature:g} K: {elapsed:.0f} s ({_ns_per_day(n_steps * self.dt, elapsed)})')
         if csv_file:
@@ -306,6 +316,8 @@ class DuckSimulation:
             r = r0 - derivative / (2 * k)
             profile[j] = (r0 * 10.0, r * 10.0, derivative / KJ_PER_KCAL / 10.0, work / KJ_PER_KCAL)
         elapsed = time.time() - start
+        self.timings.append(dict(phase='smd', temperature=temperature, simulated_ps=n_updates * steps_per_update * self.dt,
+                                 wall_s=elapsed))
         np.savetxt(dat_file, profile, fmt='%12.5f', delimiter='  ')
         self._finish_phase(pdb_file)
         print(f'  SMD at {temperature:g} K ({start_dist:g} -> {start_dist + distance:g} A): {elapsed:.0f} s '
@@ -321,13 +333,29 @@ def _ns_per_day(simulated_ps, elapsed_s):
     return f'{simulated_ps / 1000.0 / (elapsed_s / 86400.0):.1f} ns/day'
 
 
+TIMING_COLUMNS = ['cycle', 'phase', 'temperature', 'simulated_ps', 'wall_s', 'ns_per_day', 'device']
+
+
+def _append_timing(timings_file, cycle, record, device):
+    """Append the wall time of one MD/SMD run to ``timings_file`` (CSV, header written on creation)."""
+    new = not os.path.exists(timings_file)
+    with open(timings_file, 'a', newline='') as fh:
+        writer = csv.writer(fh)
+        if new:
+            writer.writerow(TIMING_COLUMNS)
+        ns_day = record['simulated_ps'] / 1000.0 / (record['wall_s'] / 86400.0) if record['wall_s'] > 0 else ''
+        writer.writerow([cycle, record['phase'], record['temperature'], f"{record['simulated_ps']:g}",
+                         f"{record['wall_s']:.2f}", f'{ns_day:.1f}' if ns_day != '' else '', device])
+
+
 def run_duck_cycles(checkpoint, pickle_file='complex_system.pickle', n_cycles=20, md_length=0.5, gpu_id=None,
                     start_dist=2.5, init_velocity=0.00001, save_dir='duck_runs', wqb_threshold=None, hmr=False,
                     temperatures=(300, 325), traj_interval_ps=4.0, **simulation_kwargs):
     """Run the DUck production: ``n_cycles`` x (MD + SMD at each temperature + WQB check).
 
     Existing outputs are reused, so an interrupted run can simply be relaunched: ``md_{i}.chk``
-    marks a finished MD and ``smd_{i}_{T}.pdb`` a finished SMD.
+    marks a finished MD and ``smd_{i}_{T}.pdb`` a finished SMD. The wall time of every MD and SMD
+    run is appended to ``save_dir/timings.csv``.
 
     Args:
         checkpoint (str): equilibrated system checkpoint (e.g. ``equil.chk``).
@@ -362,7 +390,9 @@ def run_duck_cycles(checkpoint, pickle_file='complex_system.pickle', n_cycles=20
     simulation.set_restraint_reference()  # restraints relative to the equilibrated system, as AMBER -ref 3_eq.rst
     speed = speed_from_init_velocity(init_velocity)
     platform = simulation.context.getPlatform().getName()
-    print(f'DUck production on {platform}: {n_cycles} cycles, dt = {simulation.dt * 1000:g} fs, '
+    device = simulation.device_name()
+    timings_file = save_dir / 'timings.csv'
+    print(f'DUck production on {platform} ({device}): {n_cycles} cycles, dt = {simulation.dt * 1000:g} fs, '
           f'SMD speed = {speed * 1000:g} A/ns')
 
     for i in range(n_cycles):
@@ -374,6 +404,7 @@ def run_duck_cycles(checkpoint, pickle_file='complex_system.pickle', n_cycles=20
             print(f'Simulating md_{i}')
             simulation.run_md(md_length, csv_file=f'{md}.csv', dcd_file=f'{md}.dcd', pdb_file=f'{md}.pdb',
                               checkpoint_file=f'{md}.chk', traj_interval_ps=traj_interval_ps)
+            _append_timing(timings_file, i, simulation.timings[-1], device)
             if not check_if_equlibrated(f'{md}.csv', 3):
                 raise EquilibrationError(f'md_{i} is not stable; stopping the DUck production.')
         md_state = simulation.get_state()
@@ -388,6 +419,7 @@ def run_duck_cycles(checkpoint, pickle_file='complex_system.pickle', n_cycles=20
                 simulation.run_smd(temperature, f'{smd}.dat', csv_file=f'{smd}.csv', dcd_file=f'{smd}.dcd',
                                    pdb_file=f'{smd}.pdb', start_dist=start_dist, speed=speed,
                                    traj_interval_ps=traj_interval_ps)
+                _append_timing(timings_file, i, simulation.timings[-1], device)
             wqb = get_Wqb_value(f'{smd}.dat')[0]
             if wqb_threshold is not None and wqb < wqb_threshold:
                 print(f'DUck replica {i}_{temperature} yielded a WQB of {wqb:.2f} kcal/mol, which is lower than '

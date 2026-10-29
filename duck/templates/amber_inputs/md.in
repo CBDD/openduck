@@ -1,4 +1,4 @@
-# 0.5ns PRODUCTION for ligand conformational sampling
+# 0.5 ns PRODUCTION MD for ligand conformational sampling (between SMD runs)
 &cntrl
 ntx=5, irest=1,
 iwrap=1,

@@ -255,6 +255,18 @@ openmm/  6.059  7.635    0.575  7.253      0.308         0.049
 
 SMD reports use the AMBER `jar=1` layout in both engines: one row per 0.1 ps with the target distance r<sub>0</sub> (Å), the distance r (Å), the force −2k(r − r<sub>0</sub>) (kcal mol<sup>-1</sup> Å<sup>-1</sup>) and the accumulated work (kcal/mol). Reports written by OpenDUck ≤ 0.2 (10 columns with units, 1250 rows) are still read.
 
+### Benchmarking OpenMM against AMBER
+
+Two scripts in `benchmarks/` re-run AMBER DUck validation sets (folders `<dataset>/<pdb>/<interaction>/<condition>` listed in `<dataset>/systems.txt`) with the OpenMM engine on exactly the same prepared systems (same topology, coordinates and steered atom pair) and compare both engines. Every OpenMM production also writes `duck_runs/timings.csv` with the wall time, speed and GPU of each MD and SMD run.
+
+```bash
+# run (resumable); results in OUT/<dataset>/<pdb>/<interaction>/GAFF2_openMM/ with DUCK_<n>/duck.dat as in AMBER
+python benchmarks/run_openmm_validation.py run --data-root openduck_validation --out-root OUT --gpu-id 0
+python benchmarks/run_openmm_validation.py jobs --data-root openduck_validation --out-root OUT   # SGE (A40) / Slurm arrays
+# compare execution times and the WQB / Jarzynski dG_QB regression
+python benchmarks/compare_openmm_amber.py --openmm-root OUT --data-root openduck_validation --jobs 8
+```
+
 ### Using OpenDUck as a Python library
 
 ```python

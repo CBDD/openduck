@@ -180,8 +180,9 @@ class Amber_templates(object):
 
     def write_md_inputs(self):
         '''
-        Write the inputs for minimisation (1_min.in), heating (2_heating150/200/250/300.in),
-        equilibration (3_eq.in), production MD (md.in) and the MD H-bond restraint (dist_md.rst).
+        Write the inputs for minimisation (1_min.in), heating (2_heating150/200/250/300.in, 100 ps each),
+        1 ns NPT equilibration (3_eq.in), 0.5 ns production MD per cycle (md.in) and the MD H-bond restraint
+        (dist_md.rst).
         '''
         masks = dict(chunk_residues=self.chunk_residues, water_mask=self.water_mask)
         self.write_string_to_file('1_min.in', self._read_template('min.in').format(**masks))
@@ -192,12 +193,12 @@ class Amber_templates(object):
             self.write_string_to_file(f'2_heating{temp[:3]}.in', heating_template.format(
                 seed=self.seed, temp=temp, **masks))
 
-        # same simulated times with and without HMR
-        time_step, iterations = ('0.004', '250000') if self.hmr else ('0.002', '500000')
+        # same simulated times with and without HMR: 1 ns NPT equilibration, 0.5 ns MD per cycle
+        time_step, eq_iterations, md_iterations = ('0.004', '250000', '125000') if self.hmr else ('0.002', '500000', '250000')
         self.write_string_to_file('3_eq.in', self._read_template('equilibration.in').format(
-            seed=self.seed, time_step=time_step, iterations=iterations, **masks))
+            seed=self.seed, time_step=time_step, iterations=eq_iterations, **masks))
         self.write_string_to_file('md.in', self._read_template('md.in').format(
-            seed=self.seed, time_step=time_step, iterations=iterations, **masks))
+            seed=self.seed, time_step=time_step, iterations=md_iterations, **masks))
 
         prot_idx, lig_idx = self.interaction[0], self.interaction[1]
         self.write_string_to_file('dist_md.rst', self._read_template('dist_md.rst').format(
