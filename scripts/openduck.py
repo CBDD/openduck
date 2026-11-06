@@ -15,6 +15,10 @@ Every subcommand accepts its options on the command line or in a YAML file (``-y
 are the option names with underscores (e.g. ``smd_cycles: 20``; ``ligand_mol`` and
 ``receptor_pdb`` are accepted for ``ligand`` and ``receptor``). Options given on the command
 line take precedence over the YAML file.
+
+With ``--equilibrations N`` (openmm-full-protocol, openmm-from-amber, amber-prepare) the prepared system is
+equilibrated N times independently and each equilibration runs ``--smd-cycles`` cycles in ``EQ_<k>/``;
+``report`` pools them (see :mod:`duck.utils.equilibrations`).
 """
 import argparse
 import glob
@@ -61,10 +65,12 @@ def _yaml_value(action, value):
     if isinstance(action, (argparse._StoreTrueAction, argparse._StoreFalseAction)):
         return str2bool(value)
     convert = action.type or (lambda x: x)
-    if action.nargs in ('+', '*'):
+    if action.nargs in ('+', '*') or (isinstance(action.nargs, int) and action.nargs > 1):
         values = value.replace(',', ' ').split() if isinstance(value, str) else list(
             value if isinstance(value, (list, tuple)) else [value])
         converted = [convert(str(v)) for v in values]
+        if isinstance(action.nargs, int) and len(converted) != action.nargs:
+            raise ValueError(f'expected {action.nargs} values, got {len(converted)}')
         bad = [v for v in converted if action.choices and v not in action.choices]
     else:
         converted = convert(str(value)) if not isinstance(value, (list, dict)) else value
@@ -126,6 +132,21 @@ def _add_parametrization_arguments(group, water_models=('tip3p', 'spce')):
                        help='Some simple fixes for the ligand: ensure tetravalent nitrogens have the right charge assigned and add missing hydrogen atoms.')
 
 
+def _add_water_steering_arguments(group):
+    group.add_argument('--water-steering', default=False, action='store_true',
+                       help='Enable water steering, which will use the waters-to-retain as interaction vector to steer the ligand.')
+    group.add_argument('--waters-to-restrain', default=None, type=int,
+                       help='Number (and order) of waters to restraint. Default is None when executing in the normal mode and 1 when using water-steering.')
+
+
+def _add_equilibrations_argument(group):
+    group.add_argument('--equilibrations', type=int, default=1,
+                       help='Independent equilibrations of the prepared system, each followed by its own MD/SMD cycles in '
+                            'EQ_<k>/ (the number of cycles is per equilibration). Cycles of one equilibration share its '
+                            'structure and restraint reference; spreading them over several equilibrations makes repeated runs '
+                            'agree better. Default = 1 (one equilibration in the run folder).')
+
+
 def _add_batch_arguments(parser, keep_files=False):
     group = parser.add_argument_group('Batch arguments')
     group.add_argument('-B', '--batch', default=False, action='store_true', help='Enable batch processing for multi-ligand SDF.')
@@ -140,7 +161,8 @@ def _add_batch_arguments(parser, keep_files=False):
 
 
 def _add_production_arguments(group):
-    group.add_argument('-n', '--smd-cycles', type=int, default=20, help='Number of MD/SMD cycles to perform.')
+    group.add_argument('-n', '--smd-cycles', type=int, default=20,
+                       help='Number of MD/SMD cycles to perform (per equilibration with --equilibrations).')
     group.add_argument('-m', '--md-length', type=float, default=0.5, help='Length of MD sampling between SMD runs in ns.')
     group.add_argument('-W', '--wqb-threshold', type=float, default=None,
                        help='Minimum WQB threshold; if not reached after each SMD cycle, further simulations will be terminated. '
@@ -184,7 +206,9 @@ def parse_input(argv=None):
     _add_main_arguments(group, 'OpenMM preparation')
     group.add_argument('--keep-all-files', default=False, action='store_true', help='Disable cleaning up intermediate files.')
     _add_chunk_arguments(openmm_prep)
-    _add_parametrization_arguments(openmm_prep.add_argument_group('Parameterization arguments'))
+    group = openmm_prep.add_argument_group('Parameterization arguments')
+    _add_parametrization_arguments(group)
+    _add_water_steering_arguments(group)
     group = openmm_prep.add_argument_group('Equilibration arguments')
     group.add_argument('--do-equilibrate', action='store_true', help='Perform equilibration after preparing system.')
     group.add_argument('-F', '--force-constant-eq', type=float, default=1, help='Force constant for equilibration (kcal/mol/A^2).')
@@ -205,9 +229,11 @@ def parse_input(argv=None):
     _add_chunk_arguments(full)
     group = full.add_argument_group('Parameterization arguments')
     _add_parametrization_arguments(group)
+    _add_water_steering_arguments(group)
     group.add_argument('-H', '--HMR', action='store_true', help='Perform Hydrogen Mass Repartition on the topology and run at dt = 4 fs.')
     group = full.add_argument_group('MD/SMD production arguments')
     group.add_argument('-F', '--force-constant-eq', type=float, default=1, help='Force constant for equilibration (kcal/mol/A^2).')
+    _add_equilibrations_argument(group)
     _add_production_arguments(group)
     _add_engine_arguments(group, gpu=False)
     _add_batch_arguments(full)
@@ -225,6 +251,8 @@ def parse_input(argv=None):
     equil.add_argument('-H', '--HMR', action='store_true', help='Run at dt = 4 fs (the system should have been prepared with HMR).')
     equil.add_argument('--keep-all-files', default=False, action='store_true',
                        help='Accepted for compatibility; the production files are always kept.')
+    equil.add_argument('--waters-to-restrain', default=None, type=int,
+                       help='Number of (retained) waters, counted from the first one, restrained with the chunk (water steering).')
     _add_production_arguments(equil)
     _add_engine_arguments(equil)
     equil.set_defaults(func=do_openMM_from_equil)
@@ -242,6 +270,7 @@ def parse_input(argv=None):
     openmm_prmtop.add_argument('-r', '--receptor', type=str, default=None, help='Receptor chunk (PDB or mol2) with the original residue numbering.')
     openmm_prmtop.add_argument('-H', '--HMR', action='store_true', help='Run at dt = 4 fs (hydrogen masses are repartitioned if needed).')
     openmm_prmtop.add_argument('--keep-all-files', default=False, action='store_true', help='Disable cleaning up intermediate files during simulations.')
+    _add_equilibrations_argument(openmm_prmtop)
     _add_production_arguments(openmm_prmtop)
     _add_engine_arguments(openmm_prmtop)
     openmm_prmtop.set_defaults(func=do_openMM_from_amber)
@@ -259,15 +288,14 @@ def parse_input(argv=None):
     group.add_argument('-q', '--queue-template', type=str, default='local',
                        help='Queue template to write the job script (local, Slurm, SGE or a custom {name}.q template). Default = local.')
     group.add_argument('-H', '--HMR', action='store_true', help='Perform Hydrogen Mass Repartition on the topology and use it for the input files.')
-    group.add_argument('-n', '--smd-cycles', type=int, default=20, help='Number of SMD replicas to perform.')
+    group.add_argument('-n', '--smd-cycles', type=int, default=20,
+                       help='Number of SMD replicas to perform (per equilibration with --equilibrations).')
+    _add_equilibrations_argument(group)
     group.add_argument('-W', '--wqb-threshold', type=float, default=0,
                        help='Minimum WQB threshold; if not reached after each SMD cycle, further simulations will be terminated. '
                             'Default = 0 (all SMD cycles are run).')
-    group.add_argument('--seed', default='-1', type=str, help='Specify seed for AMBER inputs.')
-    group.add_argument('--water-steering', default=False, action='store_true',
-                       help='Enable water steering, which will use the waters-to-retain as interaction vector to steer the ligand.')
-    group.add_argument('--waters-to-restrain', default=None, type=int,
-                       help='Number (and order) of waters to restraint. Default is None when executing in the normal mode and 1 when using water-steering.')
+    group.add_argument('--seed', default='-1', type=str, help='Specify seed for AMBER inputs (-1: random; required with --equilibrations).')
+    _add_water_steering_arguments(group)
     group.add_argument('-e', '--ligand-hb-elements', default=[7, 8], type=int, nargs='+',
                        help='Control which elements are accepted in the ligand to define the steering interaction. Specify using the '
                             'atomic number separated with a space. Default is 7 and 8 (nitrogen and oxygen)')
@@ -337,12 +365,21 @@ def args_sanitation(args, subparser):
         subparser.error('Batch processing requires the ligand to be in SD or SDF format.')
     if getattr(args, 'water_steering', False) and not args.waters_to_restrain:
         args.waters_to_restrain = 1
+    _check_equilibrations(args, subparser)
     if args.command == 'report':
         if args.output == 'stdout':
             args.output = sys.stdout
         if (args.iterations != 20 or args.subsample_size != 20) and args.data not in ('all', 'jarzynski'):
             subparser.error('Iterations and subsample size affect bootstrapping which is only performed when doing Jarzynski analysis.')
     return args
+
+
+def _check_equilibrations(args, subparser):
+    '''--equilibrations must be positive, and independent AMBER equilibrations need random seeds.'''
+    if getattr(args, 'equilibrations', 1) < 1:
+        subparser.error('--equilibrations must be at least 1.')
+    if getattr(args, 'equilibrations', 1) > 1 and str(getattr(args, 'seed', '-1')).strip() != '-1':
+        subparser.error('--equilibrations needs random seeds (--seed -1): with a fixed seed every equilibration would be the same.')
 
 
 def _simulation_options(args):
@@ -363,7 +400,7 @@ def _run_production(args, checkpoint='equil.chk', pickle_file='complex_system.pi
     return run_duck_cycles(checkpoint, pickle_file, n_cycles=args.smd_cycles, md_length=args.md_length, gpu_id=args.gpu_id,
                            start_dist=args.init_distance, init_velocity=args.init_velocities, save_dir='duck_runs',
                            wqb_threshold=args.wqb_threshold, hmr=args.HMR, traj_interval_ps=args.trajectory_interval,
-                           **_simulation_options(args))
+                           waters_to_restrain=getattr(args, 'waters_to_restrain', None) or 0, **_simulation_options(args))
 
 
 # ---------------------------------------------------------------------------------------------- preparation
@@ -381,7 +418,7 @@ def prepare_sys_for_amber(ligand_file, protein_file, chunk_file, interaction, HM
                           small_molecule_forcefield='SMIRNOFF', water_ff_str='tip3p', forcefield_str='amber99sb.xml',
                           ionic_strength=0.1, box_buffer_distance=10, waters_to_retain="waters_to_retain.pdb", custom_forcefield=None,
                           seed='-1', fix_ligand_file=False, clean_up=False, water_steering=False, waters_to_restrain=None,
-                          lig_HB_elements=(7, 8)):
+                          lig_HB_elements=(7, 8), inputs_class=None, inputs_options=None):
     '''
     Prepares the system for AMBER simulation by parameterizing the ligand and finding the specified interaction
     between the ligand and protein. The resulting complex is saved to a pickle file, 'complex_system.pickle', and
@@ -406,6 +443,12 @@ def prepare_sys_for_amber(ligand_file, protein_file, chunk_file, interaction, HM
         water_steering (bool, optional): Use the retained water as the receptor side of the interaction.
         waters_to_restrain (int, optional): Number of retained waters to restrain.
         lig_HB_elements (sequence of int, optional): Accepted elements of the ligand interaction atom.
+        inputs_class (class, optional): writer of the pmemd inputs, ``Amber_templates`` (DUck) by default; e.g.
+            ``Crooks_amber_templates`` for the bidirectional protocol.
+        inputs_options (dict, optional): extra keyword arguments for ``inputs_class``.
+
+    Returns:
+        list: [structure, receptor atom index, ligand atom index, distance] as stored in the pickle.
     '''
     from duck.steps.parametrize import prepare_system
     from duck.utils.cal_ints import find_interaction
@@ -417,8 +460,10 @@ def prepare_sys_for_amber(ligand_file, protein_file, chunk_file, interaction, HM
                    custom_forcefield=custom_forcefield, fix_ligand_file=fix_ligand_file, clean_up=clean_up)
     results = find_interaction(interaction, waters_to_retain if water_steering else protein_file, lig_HB_elements)
     p = _append_interaction_to_pickle(results)
-    amber_inputs = Amber_templates(structure=p[0], interaction=p[1:], hmr=HMR, seed=seed, waters_masked=waters_to_restrain)
+    amber_inputs = (inputs_class or Amber_templates)(structure=p[0], interaction=p[1:], hmr=HMR, seed=seed,
+                                                     waters_masked=waters_to_restrain, **(inputs_options or {}))
     amber_inputs.write_all_inputs()
+    return p
 
 
 def _basename(path):
@@ -428,7 +473,8 @@ def _basename(path):
 def _has_results(folder):
     '''True if ``folder`` holds a prepared system or simulation results (AMBER or OpenMM, any OpenDUck version).'''
     markers = ('complex_system.pickle', 'cs.pickle', 'duck_runs', 'equil.chk', 'eql.chk', '3_eq.rst')
-    return any(os.path.exists(os.path.join(folder, m)) for m in markers) or bool(glob.glob(os.path.join(folder, 'DUCK_*')))
+    return any(os.path.exists(os.path.join(folder, m)) for m in markers) or bool(
+        glob.glob(os.path.join(folder, 'DUCK_*')) or glob.glob(os.path.join(folder, 'EQ_*')))
 
 
 def _prepare_ligand_folder(ligand_string, lig_indx, base_dir, files, prefix, resume):
@@ -494,7 +540,7 @@ def AMBER_prepare_ligand_in_folder(ligand_string, lig_indx, protein, chunk, inte
 def openmm_prepare_ligand_in_folder(ligand_string, lig_indx, protein, chunk, interaction, HMR, base_dir, small_molecule_forcefield='SMIRNOFF',
                                     water_model='tip3p', forcefield='amber99sb', ion_strength=0.1, box_buffer_distance=10,
                                     waters_to_retain='waters_to_retain.pdb', custom_forcefield=None, fix_ligand=False, clean_up=False,
-                                    resume=False, prefix='LIG_target'):
+                                    resume=False, prefix='LIG_target', water_steering=False):
     '''
     Generate the folder for one ligand of a batch and prepare it for OpenMM (log in preparation.out).
 
@@ -519,7 +565,8 @@ def openmm_prepare_ligand_in_folder(ligand_string, lig_indx, protein, chunk, int
                            custom_forcefield=custom_forcefield, box_buffer_distance=box_buffer_distance, ionicStrength=ion_strength,
                            fix_ligand_file=fix_ligand, clean_up=clean_up, hmr=HMR)
             # the interaction is defined with the numbering of the original receptor (tleap renumbers chunks)
-            _append_interaction_to_pickle(find_interaction(interaction, os.path.basename(protein)))
+            reference = _basename(waters_to_retain) if water_steering else os.path.basename(protein)
+            _append_interaction_to_pickle(find_interaction(interaction, reference))
     except Exception:
         with open('preparation.out', 'a') as o:
             traceback.print_exc(file=o)
@@ -538,20 +585,34 @@ def _chunk_receptor(args):
                       keep_all_files=args.keep_all_files)
 
 
-def _equilibrate(args):
-    '''Equilibrate the system of the current directory (skipped in resume mode if equil.chk exists).'''
+def _equilibrate(args, pickle_file='complex_system.pickle', resume=None):
+    '''Equilibrate the system of ``pickle_file`` in the current directory (skipped in resume mode if equil.chk exists).'''
     from duck.steps.equlibrate import do_equlibrate
     from duck.utils.check_system import check_if_equlibrated
-    from duck.utils.duck_stuff import load_complex_pickle
-    if args.resume and (os.path.isfile('equil.chk') or os.path.isfile('eql.chk')):
+    from duck.utils.duck_stuff import getRestrainedAtoms, load_complex_pickle
+    resume = getattr(args, 'resume', False) if resume is None else resume
+    if resume and (os.path.isfile('equil.chk') or os.path.isfile('eql.chk')):
         print('The system is already equilibrated, skipping the equilibration (resume mode).')
         return
-    key_interaction = load_complex_pickle('complex_system.pickle')[1]
-    do_equlibrate(force_constant_equilibrate=args.force_constant_eq, gpu_id=args.gpu_id, keyInteraction=key_interaction,
-                  clean=not args.keep_all_files, hmr=args.HMR, precision=args.precision,
-                  deterministic_forces=args.deterministic_forces, threads=args.threads)
+    structure, key_interaction = load_complex_pickle(pickle_file)
+    do_equlibrate(force_constant_equilibrate=getattr(args, 'force_constant_eq', 1.0), gpu_id=args.gpu_id,
+                  keyInteraction=key_interaction, clean=not getattr(args, 'keep_all_files', False), hmr=args.HMR,
+                  precision=args.precision, pickle_file=pickle_file, deterministic_forces=args.deterministic_forces,
+                  threads=getattr(args, 'threads', None),
+                  restrained_atoms=getRestrainedAtoms(structure, getattr(args, 'waters_to_restrain', None) or 0),
+                  hb_restraint=getattr(args, 'md_restraint', None))
     if not check_if_equlibrated('density.csv', 1):
         raise EquilibrationError(f'The system in {os.getcwd()} is not equilibrated.')
+
+
+def _run_with_equilibrations(args, production, pickle_file='complex_system.pickle'):
+    '''Run ``production(checkpoint, pickle_file)`` after each of the ``args.equilibrations`` independent equilibrations
+    of the prepared system, one ``EQ_<k>/`` folder each; a true return value stops the remaining ones.'''
+    from duck.utils.equilibrations import run_independent_equilibrations
+    pickle_file = os.path.abspath(pickle_file)
+    return run_independent_equilibrations(args.equilibrations, lambda: _equilibrate(args, pickle_file, resume=False),
+                                          lambda checkpoint: production(checkpoint, pickle_file),
+                                          resume=getattr(args, 'resume', False))
 
 
 def do_OpenMM_preparation(args):
@@ -573,7 +634,7 @@ def do_OpenMM_preparation(args):
         ligand_jobs = [(ligand_string, j + args.index0, args.receptor, chunked_file, args.interaction, args.HMR, base_dir,
                         args.small_molecule_forcefield, args.water_model, args.protein_forcefield, args.ionic_strength,
                         args.solvent_buffer_distance, args.waters_to_retain, args.custom_forcefield, args.fix_ligand,
-                        not args.keep_all_files, args.resume, args.prefix)
+                        not args.keep_all_files, args.resume, args.prefix, args.water_steering)
                        for j, ligand_string in enumerate(ligand_string_generator(args.ligand))]
         with mp.Pool(args.threads) as pool:
             results = pool.starmap(openmm_prepare_ligand_in_folder, ligand_jobs)
@@ -592,7 +653,7 @@ def do_OpenMM_preparation(args):
                        ionicStrength=args.ionic_strength, fix_ligand_file=args.fix_ligand, clean_up=not args.keep_all_files,
                        hmr=args.HMR)
         os.environ['OMP_NUM_THREADS'] = str(args.threads)
-        results = find_interaction(args.interaction, args.receptor)
+        results = find_interaction(args.interaction, args.waters_to_retain if args.water_steering else args.receptor)
         print('Key interaction (protein atom, ligand atom, distance):', results)
         _append_interaction_to_pickle(results)
         folders = [base_dir]
@@ -627,10 +688,14 @@ def do_full_openMM_protocol(args):
     '''
     Full OpenDUck protocol in OpenMM: preparation, equilibration and MD/SMD production for each ligand.
     '''
-    if not args.batch and not args.resume and os.path.isdir('duck_runs'):
-        sys.exit('duck_runs/ already exists: use --resume to continue that run, or remove it to start a new one '
+    from duck.utils.equilibrations import find_equilibrations
+    if not args.batch and not args.resume and (os.path.isdir('duck_runs') or find_equilibrations('.')):
+        sys.exit('duck_runs/ or EQ_*/ already exist: use --resume to continue that run, or remove them to start a new one '
                  '(a new preparation and equilibration would be mixed with the existing MD/SMD results).')
-    args.do_equilibrate = True
+    if not args.batch and (os.path.isdir('duck_runs') if args.equilibrations > 1 else find_equilibrations('.')):
+        sys.exit(f'This folder holds a run with {"one equilibration (duck_runs/)" if args.equilibrations > 1 else "independent equilibrations (EQ_*/)"}: '
+                 'resume it with its original --equilibrations, or use another folder.')
+    args.do_equilibrate = args.equilibrations == 1  # independent equilibrations are run next to their production
     base_dir = os.getcwd()
     folders = do_OpenMM_preparation(args)
     print('Completed the preparation of all ligands')
@@ -639,7 +704,10 @@ def do_full_openMM_protocol(args):
         print(f'Starting calculations for {folder}')
         os.chdir(folder)
         try:
-            _run_production(args)
+            if args.equilibrations > 1:
+                _run_with_equilibrations(args, lambda checkpoint, pickle_file: _run_production(args, checkpoint, pickle_file) is not None)
+            else:
+                _run_production(args)
         except Exception as error:
             if not args.batch:
                 raise
@@ -662,7 +730,11 @@ def do_openMM_from_amber(args):
     '''
     Equilibrate an AMBER-prepared system (prmtop/inpcrd) and run the DUck production in OpenMM.
     '''
-    from duck.steps.equlibrate import equilibrate_from_amber_prep
+    from duck.steps.equlibrate import equilibrate_from_amber_prep, pickle_from_amber_prep
+    if args.equilibrations > 1:
+        pickle_from_amber_prep(args.interaction, args.topology, args.coordinates, args.receptor)
+        _run_with_equilibrations(args, lambda checkpoint, pickle_file: _run_production(args, checkpoint, pickle_file) is not None)
+        return
     equilibrate_from_amber_prep(interaction=args.interaction, prmtop_file=args.topology, inpcrd_file=args.coordinates,
                                 chunk=args.receptor, gpu_id=args.gpu_id, force_constant_eq=1.0, hmr=args.HMR,
                                 precision=args.precision, deterministic_forces=args.deterministic_forces,
@@ -677,7 +749,7 @@ def do_AMBER_preparation(args):
     from duck.utils.amber_inputs import Queue_templates, handle_error, ligand_string_generator
     chunk_file = _chunk_receptor(args)
     queue_options = dict(wqb_threshold=args.wqb_threshold, replicas=args.smd_cycles, hmr=args.HMR,
-                         keep_intermediate_files=args.keep_all_files)
+                         keep_intermediate_files=args.keep_all_files, equilibrations=args.equilibrations)
     if args.batch:
         base_dir = os.getcwd()
         with mp.Pool(args.threads) as pool:
@@ -719,10 +791,10 @@ def do_report(args):
     '''
     Generate a report from the dynamic undocking output. The DUck folders are looked upon the args.pattern.
     The input layout depends on args.format ('amber', 'openmm' or 'auto'), and the output on args.data
-    (min, single, avg, jarzynski or all).
+    (min, single, avg, jarzynski or all). The replicas of independent equilibrations (EQ_<k>/) are pooled.
     '''
-    from duck.utils.analysis_and_report import (build_report_df, do_jarzynski_analysis, get_mols_and_format,
-                                                get_Wqb_value_AMBER_all, get_Wqb_value_Openmm_all)
+    from duck.utils.analysis_and_report import build_report_df, do_jarzynski_analysis, get_mols_and_format, get_Wqb_value_all
+    from duck.utils.equilibrations import find_equilibrations
     folders = sorted(glob.glob(args.pattern))
     if not folders:
         sys.exit(f'No folders match the pattern {args.pattern}')
@@ -732,15 +804,11 @@ def do_report(args):
         wqb_info[folder] = []
         os.chdir(folder)
         layout = args.format
-        if layout == 'auto':
-            layout = 'openmm' if os.path.isdir('duck_runs') else 'amber'
+        if layout == 'auto':  # runs with independent equilibrations have their outputs in EQ_<k>/
+            layout = 'openmm' if os.path.isdir(os.path.join((find_equilibrations('.') or ['.'])[0], 'duck_runs')) else 'amber'
         try:
             if args.data in ('min', 'single', 'avg', 'all'):
-                if layout == 'amber':
-                    wqb = get_Wqb_value_AMBER_all(prefix='DUCK', file='duck.dat', plot=args.plot)
-                else:
-                    wqb = get_Wqb_value_Openmm_all(folder='duck_runs', pattern='smd_*.dat', plot=args.plot)
-                wqb_info[folder].extend(wqb)
+                wqb_info[folder].extend(get_Wqb_value_all(mode=layout, plot=args.plot))
             if args.data in ('jarzynski', 'all'):
                 try:
                     expavg, sd, sem_v = do_jarzynski_analysis(index_threshold=args.step_threshold, sample_size=args.subsample_size,

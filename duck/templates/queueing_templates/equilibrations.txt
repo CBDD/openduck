@@ -1,0 +1,17 @@
+
+#### Independent equilibrations ####
+# Each EQ_<k>/ runs the whole protocol below (minimisation, heating, equilibration and production) from the
+# prepared system, whose inputs and topology are linked from this folder. The seeds are random (ig=-1), so
+# every equilibration and its production are independent.
+equilibrations={equilibrations}
+RUN_DIR=$PWD
+for ((eq=0;eq<$equilibrations;++eq)); do
+   mkdir -p EQ_${{eq}}
+   for f in *.in dist_*.rst {top} system_complex.inpcrd getWqbValues.py; do
+      if [ -e "$f" ]; then ln -sf ../$f EQ_${{eq}}/$f; fi
+   done
+   cd EQ_${{eq}}
+   echo "Equilibration $eq (EQ_${{eq}})"
+{commands}
+   cd $RUN_DIR
+done

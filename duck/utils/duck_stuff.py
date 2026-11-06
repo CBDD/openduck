@@ -63,6 +63,30 @@ def getHeavyAtomsInSystem(combined_pmd):
             if atom.residue.name not in NON_CHUNK_RESIDUES and not _is_hydrogen(atom)]
 
 
+def getRestrainedAtoms(combined_pmd, waters_to_restrain=0):
+    """Atoms restrained to their reference positions during equilibration, MD and SMD.
+
+    The chunk heavy atoms (:func:`getHeavyAtomsInSystem`) plus all atoms of the first
+    ``waters_to_restrain`` water molecules, which are the structural waters retained during the
+    preparation (e.g. a water bridge steered with water steering). Mirrors the AMBER mask
+    ``(:chunk & !@H=) | :waters``.
+
+    Args:
+        combined_pmd (parmed.Structure): the prepared protein-ligand system.
+        waters_to_restrain (int): number of waters, counted from the first one, to restrain.
+
+    Returns:
+        list of int: sorted atom indices.
+    """
+    atoms = set(getHeavyAtomsInSystem(combined_pmd))
+    if waters_to_restrain:
+        waters = [residue for residue in combined_pmd.topology.residues() if residue.name in WATER_RESIDUES]
+        if len(waters) < waters_to_restrain:
+            raise ValueError(f'{waters_to_restrain} waters to restrain requested but the system has {len(waters)}.')
+        atoms.update(atom.index for residue in waters[:waters_to_restrain] for atom in residue.atoms())
+    return sorted(atoms)
+
+
 def applyHarmonicPositionalRestraints(system, forceConstantInKcalPerMolePerAngSquared, positions,
                                       indexOfAtomsToBeModified, parameter_name='k'):
     """Restrain atoms to reference positions, mimicking AMBER's ``restraint_wt``.

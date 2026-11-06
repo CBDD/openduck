@@ -50,6 +50,7 @@ check_WQB(){{
 
       # check if LIG_TARGET is set; if so, copy files there
       if [ $LIG_TARGET ]; then
+          cd ${{RUN_DIR:-.}}   # back to the run folder if inside EQ_<k>/ (independent equilibrations)
           cp -r ./* $LIG_TARGET/
       fi
       exit 

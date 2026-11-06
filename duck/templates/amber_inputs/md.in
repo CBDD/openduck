@@ -1,11 +1,11 @@
-# 0.5 ns PRODUCTION MD for ligand conformational sampling (between SMD runs)
+# {length_ns:g} ns PRODUCTION MD for ligand conformational sampling (between SMD runs)
 &cntrl
 ntx=5, irest=1,
 iwrap=1,
 ntxo=1, ntpr=2000, ntwx=0, ntwv=0, ntwe=0, ntwr=0, ioutfm=1,
 ntc=2, ntf=2,
 ntb=1, cut=9.0,
-ntt=3, temp0=300.0, gamma_ln=4.0, ig={seed},
+ntt=3, temp0={temp}, gamma_ln=4.0, ig={seed},
 nstlim={iterations}, dt={time_step},
 ntr=1,
 restraintmask='(:{chunk_residues} & !@H=) {water_mask}', 

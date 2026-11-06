@@ -11,6 +11,8 @@ More details can be found in the original dynamic undocking publication:
 
 OpenDUck can be used as a command line tool (`openduck`) or as a Python library (`duck`). It prepares the system (receptor chunking, ligand/receptor parameterization and solvation), runs the DUck protocol in OpenMM, or writes the inputs and job scripts to run it with AMBER, and analyses the results (WQB and Jarzynski ΔG<sub>QB</sub>).
 
+The library is also the base for new steering protocols. `openduck-crooks` is one: it breaks **and reforms** the interaction and obtains its free energy with the Crooks fluctuation theorem. [`examples/`](examples) also shows DUck of water bridges and of zinc-coordinating ligands, and a protocol written directly with the library.
+
 ## Installation
 
 We recommend you install OpenDUck into a fresh Conda environment.
@@ -153,6 +155,7 @@ Main options (see `openduck openmm-full-protocol -h` for all of them):
 | `-ion`, `-s`, `-water`, `-cf`, `-fl` | 0.1 M, 10 Å, `waters_to_retain.pdb` | ionic strength, box buffer, structural waters (used if the file exists), custom XML force field, simple ligand fixes |
 | `-H/--HMR` | off | hydrogen mass repartitioning and 4 fs time step |
 | `-n/--smd-cycles`, `-m/--md-length`, `-W/--wqb-threshold` | 20, 0.5 ns, none | MD/SMD cycles, MD length per cycle and early-stop WQB threshold |
+| `--equilibrations` | 1 | independent equilibrations, each followed by `--smd-cycles` cycles in `EQ_<k>/` (see [Independent equilibrations](#independent-equilibrations)) |
 | `-d/--init-distance`, `-v/--init-velocities` | 2.5 Å, 1e-5 Å/2 fs | initial SMD distance and steering speed (1e-5 Å per 2 fs = 5 Å/ns) |
 | `--force-constant-chunk`, `--smd-spring-constant` | 1.0, 50 | chunk restraint and steering spring constant (kcal mol<sup>-1</sup> Å<sup>-2</sup>, AMBER convention) |
 | `-g/--gpu-id`, `--precision`, `--integrator`, `--trajectory-interval` | CPU, mixed, langevin, 4 ps | execution options |
@@ -255,6 +258,25 @@ openmm/  6.059  7.635    0.575  7.253      0.308         0.049
 
 SMD reports use the AMBER `jar=1` layout in both engines: one row per 0.1 ps with the target distance r<sub>0</sub> (Å), the distance r (Å), the force −2k(r − r<sub>0</sub>) (kcal mol<sup>-1</sup> Å<sup>-1</sup>) and the accumulated work (kcal/mol). Reports written by OpenDUck ≤ 0.2 (10 columns with units, 1250 rows) are still read.
 
+### Independent equilibrations
+
+All the cycles of a DUck run start from one equilibrated structure, which is also the reference of the chunk restraints (`-ref 3_eq.rst`). Their WQBs are almost uncorrelated from one cycle to the next, but they share an offset set by the equilibration. In the AMBER validation data (406 H-bonds run twice with the same inputs and separate equilibrations), the mean W<sub>QB</sub> of 20 cycles differs by 2.9 kcal/mol (RMS) between the two equilibrations, against 0.7 kcal/mol between two blocks of 20 cycles of the same equilibration and 0.5 kcal/mol expected from the cycle noise. The bootstrap error of a run cannot see this offset.
+
+With `--equilibrations N` (`openmm-full-protocol`, `openmm-from-amber` and `amber-prepare`, in `openduck` and `openduck-crooks`), the prepared system is equilibrated N times and each equilibration runs its own `--smd-cycles` cycles in `EQ_<k>/` (k = 0 … N−1):
+
+* OpenMM: `EQ_<k>/equil.chk` and `EQ_<k>/duck_runs/` (or `crooks_runs/`); `--resume` reuses the finished equilibrations and cycles.
+* AMBER: the job script runs the whole protocol (minimisation, heating, equilibration and production) inside each `EQ_<k>/`, with the inputs and topology linked from the run folder. The seeds must be random (`--seed -1`). A WQB below the threshold stops the whole run.
+
+`report` (in both executables) pools the cycles of all the equilibrations and bootstraps them in two stages, first the equilibrations and then the cycles, so the errors include the variation between equilibrations. With the same number of SMDs, e.g. `--equilibrations 4 --smd-cycles 5` instead of 20 cycles, an equilibration costs about as much as one cycle (1.4 ns in AMBER, 0.2 ns in OpenMM, against 1.5 ns per cycle).
+
+`benchmarks/equilibration_reproducibility.py` measures whether this makes repeated runs agree: it runs every layout (e.g. `1x20`, `4x5`, `20x1`) several times for the selected validation systems and compares the spread between repeats with the error reported by each run.
+
+```bash
+python benchmarks/equilibration_reproducibility.py suggest -n 12      # systems spanning the AMBER spread
+python benchmarks/equilibration_reproducibility.py jobs --out-root REPRO --only <systems> --layouts 1x20 4x5 20x1 --repeats 3
+python benchmarks/equilibration_reproducibility.py analyse --out-root REPRO --only <systems> --plot
+```
+
 ### Benchmarking OpenMM against AMBER
 
 Two scripts in `benchmarks/` re-run AMBER DUck validation sets (folders `<dataset>/<pdb>/<interaction>/<condition>` listed in `<dataset>/systems.txt`) with the OpenMM engine on exactly the same prepared systems (same topology, coordinates and steered atom pair) and compare both engines. Every OpenMM production also writes `duck_runs/timings.csv` with the wall time, speed and GPU of each MD and SMD run.
@@ -266,6 +288,26 @@ python benchmarks/run_openmm_validation.py jobs --data-root openduck_validation 
 # compare execution times and the WQB / Jarzynski dG_QB regression
 python benchmarks/compare_openmm_amber.py --openmm-root OUT --data-root openduck_validation --jobs 8
 ```
+
+### Bidirectional pulls and the Crooks fluctuation theorem (`openduck-crooks`)
+
+`openduck-crooks` runs DUck-style cycles in which each forward pull (2.5 → 5 Å) is followed by a reverse pull (5 → 2.5 Å) from its final coordinates with new velocities. The free energy is the crossing of the forward and reverse work distributions (Crooks fluctuation theorem, thesis ch. 6.4), reported with the Gaussian intersection, BAR and Jarzynski estimates, bootstrap errors and the DUck WQB/ΔG<sub>QB</sub> of the forward pulls. It has the same input conventions (yaml files, preparation options, water steering, custom force fields) and both engines:
+
+```
+$ openduck-crooks -h
+    openmm-full-protocol      Preparation, equilibration and bidirectional pulls in OpenMM.
+    openmm-from-equilibrated  Bidirectional pulls in OpenMM from an equilibrated system.
+    openmm-from-amber         Bidirectional pulls in OpenMM from an AMBER topology and coordinates.
+    amber-prepare             Preparation, pmemd inputs and job script of the bidirectional protocol.
+    report                    Free energies and plots of finished bidirectional runs.
+```
+
+```bash
+openduck-crooks openmm-full-protocol -y examples/hbond/crooks-openmm-full-protocol.yaml
+openduck-crooks report -p '*/' --plot -o crooks_report.tbl
+```
+
+See [`examples/README.md`](examples/README.md) for the protocol, its options (speed, spring, approach, reverse velocities, MD restraint window), how to reproduce the thesis settings and the water-bridge and zinc examples.
 
 ### Using OpenDUck as a Python library
 
@@ -284,7 +326,7 @@ sim.run_md(0.5, csv_file='md.csv')
 work_profile = sim.run_smd(300, 'smd_300.dat', start_dist=2.5, speed=0.005)  # numpy array (r0, r, force, work)
 ```
 
-The analysis functions (`duck.utils.analysis_and_report`), the restraint builders (`duck.utils.duck_stuff`), the preparation (`duck.steps.parametrize`, `duck.steps.chunk`) and the AMBER templates (`duck.utils.amber_inputs`) can be used in the same way to build new protocols.
+The analysis functions (`duck.utils.analysis_and_report`, `duck.utils.crooks`), the restraint builders (`duck.utils.duck_stuff`), the preparation (`duck.steps.parametrize`, `duck.steps.chunk`) and the AMBER templates (`duck.utils.amber_inputs`) can be used in the same way to build new protocols. `DuckSimulation.run_smd` steers in both directions (negative `distance`) with an optional per-run `spring_k`, and `run_hold`, `reassign_velocities` and `current_distance` cover the usual protocol steps. [`examples/custom_protocol.py`](examples/custom_protocol.py) writes the forward/reverse protocol in ~40 lines, and `duck.steps.bidirectional` is the full version behind `openduck-crooks`.
 
 ### Changes in 0.3
 

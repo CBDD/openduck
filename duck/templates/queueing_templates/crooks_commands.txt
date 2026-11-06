@@ -1,0 +1,31 @@
+
+#### PARAMS ####
+cycles={cycles}
+min_wqb={wqb_threshold}
+
+#### Running the bidirectional (forward/reverse) SMD protocol ####
+# Minimization
+if [ ! -f 3_eq.rst ]; then
+pmemd.cuda -O -i 1_min.in -o min.out -p {top} -c system_complex.inpcrd -r min.rst -ref system_complex.inpcrd
+
+# Centering box to allow iwrap, not being centered to 0,0,0 bricks the system when using iwrap and nmr restraints together
+echo -e "trajin min.rst\ncenter\ntrajout min.rst\nrun\nquit" | cpptraj -p {top}
+
+# Heating & Equilibration
+pmemd.cuda -O -i 2_heating150.in -o 2_heating150.out -p {top} -c min.rst -r  2_heating150.rst -x 2_heating150.nc -ref min.rst
+pmemd.cuda -O -i 2_heating200.in -o 2_heating200.out -p {top} -c 2_heating150.rst -r 2_heating200.rst -x 2_heating200.nc -ref 2_heating150.rst
+pmemd.cuda -O -i 2_heating250.in -o 2_heating250.out -p {top} -c 2_heating200.rst -r 2_heating250.rst -x 2_heating250.nc -ref 2_heating200.rst
+pmemd.cuda -O -i 2_heating300.in -o 2_heating300.out -p {top} -c 2_heating250.rst -r 2_heating300.rst -x 2_heating300.nc -ref 2_heating250.rst
+pmemd.cuda -O -i 3_eq.in -o 3_eq.out -p {top} -c 2_heating300.rst -r 3_eq.rst -x 3_eq.nc -ref 2_heating300.rst -e 3_eq.ene
+fi
+
+# Each cycle: MD from the previous cycle, then approach, forward and reverse pulls in CYCLE_<i>/
+# (finished runs are skipped, so the script can be relaunched to resume)
+for ((i=0;i<$cycles;++i)); do
+   if [ "$i" == "0" ]; then previous=3_eq.rst; else previous=md_$((i-1)).rst; fi
+   if [ ! -f md_${{i}}.rst ]; then
+      pmemd.cuda -O -i md.in -o md_${{i}}.out -p {top} -c $previous -r md_${{i}}.rst -x md_${{i}}.nc -ref 3_eq.rst
+   fi
+   run_bidirectional_cycle $i
+   check_WQB $min_wqb
+done

@@ -42,6 +42,7 @@ setup(
     entry_points={
         "console_scripts": [
             "openduck=scripts.openduck:main",
+            "openduck-crooks=scripts.openduck_crooks:main",
             "openmm_job_launcher=scripts.openmm_job_launcher:main",
         ]
     },

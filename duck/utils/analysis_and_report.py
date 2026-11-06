@@ -28,6 +28,10 @@ SMD outputs come in two formats, detected automatically by :func:`read_duck_dat`
   work (kcal/mol); 5000 rows per replica.
 * Legacy OpenDUck OpenMM files: 10 tokens per row including units, e.g.
   ``0 2.502 A 0.3108 nm -30.3 kcal/(A mol) -0.06 kcal/mol``; 1250 rows.
+
+Runs with independent equilibrations (``--equilibrations``) have one ``EQ_<k>/`` folder per equilibration with
+the layouts above inside. Their replicas are pooled, and the bootstrap resamples the equilibrations before the
+replicas (see :mod:`duck.utils.equilibrations`), so the errors include the variation between equilibrations.
 """
 import glob
 import os
@@ -39,6 +43,9 @@ import numpy as np
 import pandas as pd
 from scipy.special import logsumexp
 from scipy.stats import sem, shapiro
+
+from duck.utils.equilibrations import PREFIX as EQUILIBRATION_PREFIX
+from duck.utils.equilibrations import cluster_bootstrap_indices, equilibration_of, find_equilibrations
 
 #: Boltzmann constant in kcal/(mol K), as used in the original DUck scripts.
 KB_KCAL = 0.0019872
@@ -332,6 +339,32 @@ def get_Wqb_value_AMBER_all(prefix='DUCK', file='duck.dat', plot=False):
     return _collect_wqb(dat_files, plot=plot)
 
 
+def get_Wqb_value_all(mode=None, plot=False):
+    '''
+    Obtain the Wqb of all replicas of the run in the current directory, including those of independent
+    equilibrations (``EQ_<k>/``).
+
+    Args:
+        mode (str, optional): 'amber' (``DUCK_*/duck.dat``) or 'openmm' (``duck_runs/smd_*.dat``); detected if None.
+        plot (bool): plot the work profiles to wqb_plot.png.
+
+    Returns:
+        tuple: (lowest Wqb, or 'Nan' if there are no replicas, [(replica, wqb), ...]). Replicas are named as in
+        :func:`get_Wqb_value_AMBER_all` and :func:`get_Wqb_value_Openmm_all`, with the ``EQ_<k>/`` prefix if any.
+    '''
+    mode = mode or _detect_engine_layout()
+    dat_files = []
+    for root in find_equilibrations('.') or ['.']:
+        if mode == 'amber':
+            folders = sorted([fol for fol in os.listdir(root) if fol.startswith('DUCK')
+                              and os.path.isfile(os.path.join(root, fol, 'duck.dat'))], key=_natural_key)
+            dat_files += [(os.path.normpath(os.path.join(root, fol)), os.path.join(root, fol, 'duck.dat')) for fol in folders]
+        else:
+            files = sorted(glob.glob(os.path.join(root, 'duck_runs', 'smd_*.dat')), key=_natural_key)
+            dat_files += [(os.path.normpath(f), f) for f in files]
+    return _collect_wqb(dat_files, plot=plot)
+
+
 # jarzynksi functions
 _OPENMM_DAT = re.compile(r'smd_\d+_(\d+)\.dat$')
 _AMBER_DIR_HOT = re.compile(r'^DUCK_(\d+)K_\d+$')
@@ -505,7 +538,7 @@ def shapiro_test(work_df):
     return bool(p >= 0.05)
 
 
-def sample_jarz(norm_df, sample_size, temp, rng=None):
+def sample_jarz(norm_df, sample_size, temp, rng=None, groups=None):
     '''Jarzynski profile of one bootstrap sample: `sample_size` replicas drawn with replacement.
 
     Args:
@@ -513,16 +546,22 @@ def sample_jarz(norm_df, sample_size, temp, rng=None):
         sample_size (int): Number of replicas drawn.
         temp (float): Temperature in K.
         rng (numpy.random.Generator, optional): Random generator; a freshly seeded one if None.
+        groups (sequence, optional): equilibration of each column. With more than one, the equilibrations are
+            resampled first and the replicas are drawn from the resampled ones (two-stage bootstrap).
     '''
     if rng is None:
         rng = np.random.Generator(np.random.PCG64())
-    new_df = norm_df.sample(n=sample_size, replace=True, axis='columns', random_state=rng)
+    if groups is not None and len(set(groups)) > 1:
+        indices, _ = cluster_bootstrap_indices(groups, sample_size, rng)
+        new_df = norm_df.iloc[:, indices]
+    else:
+        new_df = norm_df.sample(n=sample_size, replace=True, axis='columns', random_state=rng)
     new_df.columns = [f'Sample_{x}' for x in range(sample_size)]
     jarz_df = get_expavg_FD_df(new_df, T=temp, calculate_FD=False)
     return jarz_df
 
 
-def bootstrap_df(norm_data_list, sample_size=20, samples=20, plot=True, temps=[300, 325], seed=None):
+def bootstrap_df(norm_data_list, sample_size=20, samples=20, plot=True, temps=[300, 325], seed=None, groups=None):
     """
     Perform bootstrap sampling of the normalized work dataframes to estimate the distribution of the Jarzynski free energy
     estimate. Each temperature is sampled separatedly and then merged when the jarzynski is already calculated.
@@ -534,6 +573,8 @@ def bootstrap_df(norm_data_list, sample_size=20, samples=20, plot=True, temps=[3
     plot: bool, whether to plot the bootstrapped Jarzynski free energy distribution
     temps: list of ints, the temperatures at which to perform the bootstrapping
     seed: int or None, seed of the random generator (None for a non-reproducible run)
+    groups: list (one per dataframe) of the equilibration of each column, or None. Runs with several independent
+            equilibrations are resampled in two stages (see :func:`sample_jarz`).
 
     Returns:
     flat_df: pandas.DataFrame, a flat dataframe of bootstrapped Jarzynski free energy estimates and the corresponding CV value
@@ -542,11 +583,12 @@ def bootstrap_df(norm_data_list, sample_size=20, samples=20, plot=True, temps=[3
     """
     rng = np.random.default_rng(seed)
     sample_dfs = []
-    for temp, norm_df in zip(temps, norm_data_list):
+    groups = groups if groups is not None else [None] * len(norm_data_list)
+    for temp, norm_df, df_groups in zip(temps, norm_data_list, groups):
         if not len(norm_df):
             continue
         for i in range(samples):
-            sample_dfs.append(sample_jarz(norm_df, sample_size, temp, rng=rng))
+            sample_dfs.append(sample_jarz(norm_df, sample_size, temp, rng=rng, groups=df_groups))
     if not sample_dfs:
         return pd.DataFrame({'CV': [], 'Jarzynski': []}), sample_dfs
     flat_df = pd.DataFrame({
@@ -630,13 +672,15 @@ def get_real_jarzynski_from_bootstrapping(sample_dfs, save=None, splitting_point
 
 def _detect_engine_layout():
     '''Guess the SMD output layout of the current directory: 'openmm' (duck_runs/smd_*.dat) or 'amber'.'''
-    return 'openmm' if glob.glob(os.path.join('duck_runs', 'smd_*.dat')) else 'amber'
+    roots = find_equilibrations('.') or ['.']
+    return 'openmm' if any(glob.glob(os.path.join(root, 'duck_runs', 'smd_*.dat')) for root in roots) else 'amber'
 
 
 def do_jarzynski_analysis(temperatures=[300, 325], index_threshold=None, sample_size=20, samples=20, plot=True,
                           mode='amber', seed=None):
     """
     Performs the Jarzynski analysis on a set of SMD data at different temperatures. To assess the significance of the values obtained, bootstrapping is performed.
+    The replicas of independent equilibrations (``EQ_<k>/``) are pooled and bootstrapped in two stages.
 
     Args:
         temperatures (list, optional): A list of temperatures (in Kelvin) at which the simulations were performed. Defaults to [300,325].
@@ -654,18 +698,20 @@ def do_jarzynski_analysis(temperatures=[300, 325], index_threshold=None, sample_
     """
     if mode is None:
         mode = _detect_engine_layout()
-    norm_datas, FD_datas = [], []
+    norm_datas, FD_datas, groups = [], [], []
+    prefix = f'{EQUILIBRATION_PREFIX}_[0-9]*/' if find_equilibrations('.') else ''
     for T in temperatures:
         if mode == 'amber':
-            pattern = 'DUCK_*/duck.dat'
+            pattern = prefix + 'DUCK_*/duck.dat'
         elif mode == 'openmm':
-            pattern = f'duck_runs/smd_*_{T}.dat'
+            pattern = prefix + f'duck_runs/smd_*_{T}.dat'
         else:
             raise ValueError(f'{mode} is not a valid SMD output layout; use amber or openmm.')
         WQB_df = read_DUckdat(pattern=pattern, temp=T)
         norm_df = normalize_by_series(WQB_df, index_threshold=index_threshold)
         FD_datas.append(get_expavg_FD_df(norm_df, T=T))
         norm_datas.append(norm_df)
+        groups.append([equilibration_of(column) for column in norm_df.columns] if prefix else None)
     if not any(len(df.columns) for df in norm_datas):
         raise ValueError(f'No SMD work reports found in {os.getcwd()} for the {mode} layout.')
     norm_df = pd.concat(norm_datas, axis=1)
@@ -683,7 +729,7 @@ def do_jarzynski_analysis(temperatures=[300, 325], index_threshold=None, sample_
 
     # obtained bootstrapped data on jarzynski
     flat_bootstrapped_df, sampled_dfs = bootstrap_df(norm_datas, sample_size=sample_size, samples=samples, plot=plot,
-                                                     temps=temperatures, seed=seed)
+                                                     temps=temperatures, seed=seed, groups=groups)
     stats_df = get_stats_from_bootstrapping(flat_bootstrapped_df, CVs)
     avg, sd, sem_v, max_stats = get_real_jarzynski_from_bootstrapping(sampled_dfs, save='jarz_sd_sem.tbl',
                                                                       splitting_point=index_threshold)

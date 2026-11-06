@@ -25,7 +25,8 @@ EQUILIBRATION_FILES = ['minimisation.pdb', 'heating.csv', 'heating.dcd', 'heatin
 
 def do_equlibrate(force_constant_equilibrate=1.0, gpu_id=0, keyInteraction=None, clean=False, hmr=False,
                   precision='mixed', pickle_file='complex_system.pickle', temperature=300.0, friction=4.0,
-                  heating_ps=100.0, density_ps=100.0, report_ps=2.0, deterministic_forces=False, threads=None):
+                  heating_ps=100.0, density_ps=100.0, report_ps=2.0, deterministic_forces=False, threads=None,
+                  restrained_atoms=None, hb_restraint=None):
     """Minimise, heat and equilibrate the density of the system stored in ``pickle_file``.
 
     Args:
@@ -44,6 +45,11 @@ def do_equlibrate(force_constant_equilibrate=1.0, gpu_id=0, keyInteraction=None,
         report_ps (float): reporting interval in ps.
         deterministic_forces (bool): bitwise reproducible forces (slower).
         threads (int, optional): CPU threads for the CPU platform.
+        restrained_atoms (list of int, optional): atoms restrained to the prepared coordinates; defaults
+            to the chunk heavy atoms (see :func:`duck.utils.duck_stuff.getRestrainedAtoms` to add waters).
+        hb_restraint (sequence, optional): flat-bottom restraint of the key interaction during heating and
+            NPT, ``(r2, r3, r4, k2, k3)`` in A and kcal/mol/A^2 (as ``dist_md.rst``). Defaults to
+            ``(2, 3, 4, force_constant_equilibrate, 10)``.
 
     Returns:
         list: ``['equil.chk']``
@@ -53,7 +59,7 @@ def do_equlibrate(force_constant_equilibrate=1.0, gpu_id=0, keyInteraction=None,
     platform, platformProperties = duck_stuff.get_platform(gpu_id, precision, deterministic_forces, threads)
     combined_pmd = duck_stuff.loadPickle(pickle_file)
     combined_pmd.symmetry = None
-    chunk_heavy_atoms = duck_stuff.getHeavyAtomsInSystem(combined_pmd)
+    chunk_heavy_atoms = restrained_atoms if restrained_atoms is not None else duck_stuff.getHeavyAtomsInSystem(combined_pmd)
     dt = 0.004 if hmr else 0.002
     if hmr and not duck_stuff.structure_has_hmr(combined_pmd):
         print('HMR requested but the system has standard hydrogen masses: repartitioning them now.')
@@ -82,8 +88,9 @@ def do_equlibrate(force_constant_equilibrate=1.0, gpu_id=0, keyInteraction=None,
                                        constraints=app.HBonds, hydrogenMass=None)
     duck_stuff.applyHarmonicPositionalRestraints(system, force_constant_equilibrate, combined_pmd.positions,
                                                  chunk_heavy_atoms)
-    duck_stuff.applyLigandChunkRestraint(system, force_constant_equilibrate, 10.0, 2 * u.angstrom, 3 * u.angstrom,
-                                         4 * u.angstrom, keyInteraction)
+    r2, r3, r4, k2, k3 = hb_restraint if hb_restraint is not None else (2.0, 3.0, 4.0, force_constant_equilibrate, 10.0)
+    duck_stuff.applyLigandChunkRestraint(system, k2, k3, r2 * u.angstrom, r3 * u.angstrom, r4 * u.angstrom,
+                                         keyInteraction)
     integrator = mm.LangevinIntegrator(temperature * u.kelvin, friction / u.picosecond, dt * u.picosecond)
     simulation = app.Simulation(combined_pmd.topology, system, integrator, platform, platformProperties)
     simulation.context.setPositions(positions)
@@ -121,12 +128,28 @@ def do_equlibrate(force_constant_equilibrate=1.0, gpu_id=0, keyInteraction=None,
     return [checkpoint]
 
 
+def pickle_from_amber_prep(interaction, prmtop_file, inpcrd_file, chunk, pickle_file='complex_system.pickle'):
+    """Write the preparation pickle of a system prepared for AMBER (prmtop + inpcrd).
+
+    The key interaction is located through the chunk file (receptor atom ``interaction``, e.g.
+    ``A_ASN_140_ND2``, with the original residue numbering).
+
+    Returns:
+        list: the key interaction ``[protein_atom, ligand_atom, distance]``.
+    """
+    c_pm = parmed.load_file(prmtop_file, inpcrd_file)
+    keyInteraction = cal_ints.find_interaction_amber_input(combined_pmd=c_pm, chunk_file=chunk, res_atom=interaction)
+    with open(pickle_file, 'wb') as fh:
+        pickle.dump([c_pm] + keyInteraction, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    return keyInteraction
+
+
 def equilibrate_from_amber_prep(interaction, prmtop_file, inpcrd_file, chunk, gpu_id, force_constant_eq=1.0,
                                 **equilibration_kwargs):
     """Equilibrate a system prepared for AMBER (prmtop + inpcrd) to run the OpenMM DUck protocol.
 
     The key interaction is located through the chunk file, the system and the interaction are
-    written to ``complex_system.pickle`` and :func:`do_equlibrate` is run.
+    written to ``complex_system.pickle`` (:func:`pickle_from_amber_prep`) and :func:`do_equlibrate` is run.
 
     Args:
         interaction (str): receptor atom as ``chain_resname_resid_atomname``.
@@ -143,10 +166,7 @@ def equilibrate_from_amber_prep(interaction, prmtop_file, inpcrd_file, chunk, gp
         EquilibrationError: if the potential energy of the NPT stage looks unstable.
     """
     from duck.utils.check_system import check_if_equlibrated
-    c_pm = parmed.load_file(prmtop_file, inpcrd_file)
-    keyInteraction = cal_ints.find_interaction_amber_input(combined_pmd=c_pm, chunk_file=chunk, res_atom=interaction)
-    with open('complex_system.pickle', 'wb') as fh:
-        pickle.dump([c_pm] + keyInteraction, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    keyInteraction = pickle_from_amber_prep(interaction, prmtop_file, inpcrd_file, chunk)
     checkpoint = do_equlibrate(keyInteraction=keyInteraction, force_constant_equilibrate=force_constant_eq,
                                gpu_id=gpu_id, **equilibration_kwargs)
     if not check_if_equlibrated('density.csv', 1):

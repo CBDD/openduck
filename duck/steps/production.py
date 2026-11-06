@@ -30,6 +30,12 @@ Implementation notes
 Output files (unchanged names): ``md_{i}.{chk,csv,pdb,dcd}`` and ``smd_{i}_{T}.{dat,csv,pdb,dcd}``.
 The ``.dat`` files use the AMBER ``jar=1`` DUMPAVE layout: ``r0 (A)  r (A)  force (kcal/mol/A)
 work (kcal/mol)``.
+
+``DuckSimulation`` is also the building block of other steering protocols: ``run_smd`` steers in
+either direction (a negative ``distance`` pulls the pair together) with an optional spring constant
+for that run only, ``reassign_velocities`` draws new Maxwell-Boltzmann velocities and the restrained
+atoms and the flat-bottom window of the MD restraint can be chosen. See
+:mod:`duck.steps.bidirectional` for a forward/reverse (Crooks) protocol built on it.
 """
 import csv
 import os
@@ -39,9 +45,10 @@ from pathlib import Path
 import numpy as np
 
 from duck.utils.compat import mm, app, unit as u
-from duck.utils.duck_stuff import (SMD_FORCE_GROUP, addSteeringRestraint, applyHarmonicPositionalRestraints,
-                                   applyLigandChunkRestraint, apply_hmr, getHeavyAtomsInSystem, get_platform,
-                                   load_complex_pickle, structure_has_hmr)
+from duck.utils.duck_stuff import (SMD_FORCE_GROUP, _to_kj_per_nm2, addSteeringRestraint,
+                                   applyHarmonicPositionalRestraints, applyLigandChunkRestraint, apply_hmr,
+                                   getHeavyAtomsInSystem, getRestrainedAtoms, get_platform, load_complex_pickle,
+                                   structure_has_hmr)
 from duck.utils.check_system import check_temperature
 from duck.utils.exceptions import EquilibrationError
 
@@ -119,6 +126,12 @@ class DuckSimulation:
             kcal/mol/A^2 (AMBER ``rk2``).
         hb_restraint_k2, hb_restraint_k3 (float): flat-bottom H-bond restraint used during MD
             (``dist_md.rst`` rk2/rk3), kcal/mol/A^2.
+        hb_restraint_distances (sequence): ``(r2, r3, r4)`` of the flat-bottom restraint in A
+            (``dist_md.rst``: harmonic below r2 and above r3, linear beyond r4).
+        restrained_atoms (sequence of int, optional): atoms restrained to their reference positions
+            with ``chunk_restraint_k``. Defaults to the chunk heavy atoms
+            (:func:`duck.utils.duck_stuff.getHeavyAtomsInSystem`); add e.g. the structural waters of a
+            water bridge here.
         integrator (str): ``'langevin'`` or ``'langevin-middle'``.
         friction (float): Langevin collision rate in 1/ps.
         timestep (float, optional): time step in ps; defaults to 0.004 with HMR, else 0.002.
@@ -130,7 +143,8 @@ class DuckSimulation:
     def __init__(self, structure, key_interaction, gpu_id=None, hmr=False, precision='mixed',
                  temperature=300.0, chunk_restraint_k=1.0, smd_spring_k=50.0, hb_restraint_k2=1.0,
                  hb_restraint_k3=10.0, integrator='langevin', friction=4.0, timestep=None,
-                 deterministic_forces=False, threads=None, nonbonded_cutoff=9.0):
+                 deterministic_forces=False, threads=None, nonbonded_cutoff=9.0,
+                 hb_restraint_distances=(2.0, 3.0, 4.0), restrained_atoms=None):
         if len(key_interaction) < 2:
             raise ValueError('The key interaction (protein atom, ligand atom) is missing from the system pickle.')
         self.protein_atom, self.ligand_atom = int(key_interaction[0]), int(key_interaction[1])
@@ -146,10 +160,13 @@ class DuckSimulation:
 
         system = structure.createSystem(nonbondedMethod=app.PME, nonbondedCutoff=nonbonded_cutoff * u.angstrom,
                                         constraints=app.HBonds, hydrogenMass=None)
+        if restrained_atoms is None:
+            restrained_atoms = getHeavyAtomsInSystem(structure)
         self._restraint = applyHarmonicPositionalRestraints(
-            system, chunk_restraint_k, structure.positions, getHeavyAtomsInSystem(structure), parameter_name='chunk_k')
-        applyLigandChunkRestraint(system, hb_restraint_k2, hb_restraint_k3, 2 * u.angstrom, 3 * u.angstrom,
-                                  4 * u.angstrom, key_interaction, prefix='hb_', switch_parameter='hb_on')
+            system, chunk_restraint_k, structure.positions, sorted(set(restrained_atoms)), parameter_name='chunk_k')
+        r2, r3, r4 = (float(x) * u.angstrom for x in hb_restraint_distances)
+        applyLigandChunkRestraint(system, hb_restraint_k2, hb_restraint_k3, r2, r3, r4, key_interaction,
+                                  prefix='hb_', switch_parameter='hb_on')
         addSteeringRestraint(system, self.protein_atom, self.ligand_atom, spring_constant=smd_spring_k, prefix='smd_')
         self._smd_k = self._parameter_value(system, 'smd_k')
         self._parameters = {force.getGlobalParameterName(i): force.getGlobalParameterDefaultValue(i)
@@ -213,6 +230,29 @@ class DuckSimulation:
     def set_state(self, state):
         self.context.setState(state)
 
+    def reassign_velocities(self, temperature=None, seed=None):
+        """Draw new Maxwell-Boltzmann velocities at ``temperature`` (K, default the MD temperature).
+
+        The analogue of restarting AMBER with ``irest=0, ntx=1, tempi=T``.
+        """
+        temperature = self.temperature if temperature is None else float(temperature)
+        if seed is None:
+            self.context.setVelocitiesToTemperature(temperature * u.kelvin)
+        else:
+            self.context.setVelocitiesToTemperature(temperature * u.kelvin, int(seed))
+
+    def current_distance(self):
+        """Minimum-image distance (A) between the two atoms of the key interaction."""
+        state = self.context.getState(getPositions=True)
+        positions = state.getPositions(asNumpy=True).value_in_unit(u.angstrom)
+        delta = positions[self.ligand_atom] - positions[self.protein_atom]
+        a, b, c = (np.array(v.value_in_unit(u.angstrom)) for v in state.getPeriodicBoxVectors())
+        # reduced (triclinic) box vectors as in OpenMM: c, then b, then a
+        delta = delta - c * round(delta[2] / c[2])
+        delta = delta - b * round(delta[1] / b[1])
+        delta = delta - a * round(delta[0] / a[0])
+        return float(np.linalg.norm(delta))
+
     def set_restraint_reference(self, positions=None):
         """Use ``positions`` (default: the current coordinates) as reference of the chunk restraints."""
         if positions is None:
@@ -224,9 +264,9 @@ class DuckSimulation:
         self._restraint.updateParametersInContext(self.context)
 
     # ------------------------------------------------------------------ helpers
-    def _set_phase(self, phase, temperature):
+    def _set_phase(self, phase, temperature, smd_k=None):
         self.context.setParameter('hb_on', 1.0 if phase == 'md' else 0.0)
-        self.context.setParameter('smd_k', self._smd_k if phase == 'smd' else 0.0)
+        self.context.setParameter('smd_k', (self._smd_k if smd_k is None else smd_k) if phase == 'smd' else 0.0)
         self.integrator.setTemperature(temperature * u.kelvin)
 
     def _attach_reporters(self, csv_file, dcd_file, total_steps, log_interval_ps, traj_interval_ps):
@@ -258,7 +298,7 @@ class DuckSimulation:
 
     # ------------------------------------------------------------------ phases
     def run_md(self, length_ns, csv_file=None, dcd_file=None, pdb_file=None, checkpoint_file=None,
-               temperature=None, log_interval_ps=4.0, traj_interval_ps=4.0):
+               temperature=None, log_interval_ps=4.0, traj_interval_ps=4.0, label='md'):
         """Run restrained MD (H-bond flat-bottom restraint on, steering off).
 
         Args:
@@ -266,6 +306,7 @@ class DuckSimulation:
             csv_file, dcd_file, pdb_file, checkpoint_file (str, optional): outputs.
             temperature (float, optional): K, defaults to the simulation temperature.
             log_interval_ps, traj_interval_ps (float): reporting intervals; 0 disables the trajectory.
+            label (str): phase name stored in ``self.timings``.
         """
         temperature = self.temperature if temperature is None else float(temperature)
         n_steps = int(round(length_ns * 1000.0 / self.dt))
@@ -274,31 +315,64 @@ class DuckSimulation:
         start = time.time()
         self.simulation.step(n_steps)
         elapsed = time.time() - start
-        self.timings.append(dict(phase='md', temperature=temperature, simulated_ps=n_steps * self.dt, wall_s=elapsed))
+        self.timings.append(dict(phase=label, temperature=temperature, simulated_ps=n_steps * self.dt, wall_s=elapsed))
         self._finish_phase(pdb_file, checkpoint_file)
         print(f'  MD {length_ns:g} ns at {temperature:g} K: {elapsed:.0f} s ({_ns_per_day(n_steps * self.dt, elapsed)})')
         if csv_file:
             check_temperature(csv_file, temperature)
 
+    def run_hold(self, length_ns, r0, temperature=None, spring_k=None, csv_file=None, log_interval_ps=4.0,
+                 label='hold'):
+        """Run MD with the steering spring fixed at ``r0`` (A): equilibration at one end of a pull.
+
+        Args:
+            length_ns (float): simulated time in ns.
+            r0 (float): spring centre in A.
+            temperature (float, optional): K, defaults to the simulation temperature.
+            spring_k (float, optional): spring constant in kcal/mol/A^2 (default ``smd_spring_k``).
+            csv_file (str, optional): StateDataReporter log.
+            label (str): phase name stored in ``self.timings``.
+        """
+        temperature = self.temperature if temperature is None else float(temperature)
+        n_steps = int(round(length_ns * 1000.0 / self.dt))
+        self._set_phase('smd', temperature, smd_k=None if spring_k is None else _to_kj_per_nm2(spring_k))
+        self.context.setParameter('smd_r0', r0 / 10.0)
+        self._attach_reporters(csv_file, None, n_steps, log_interval_ps, 0)
+        start = time.time()
+        self.simulation.step(n_steps)
+        elapsed = time.time() - start
+        self.timings.append(dict(phase=label, temperature=temperature, simulated_ps=n_steps * self.dt, wall_s=elapsed))
+        self._finish_phase()
+        print(f'  Hold at {r0:g} A, {length_ns:g} ns at {temperature:g} K: {elapsed:.0f} s '
+              f'({_ns_per_day(n_steps * self.dt, elapsed)})')
+
     def run_smd(self, temperature, dat_file, csv_file=None, dcd_file=None, pdb_file=None, start_dist=2.5,
-                distance=2.5, speed=0.005, report_interval_ps=0.1, log_interval_ps=0.4, traj_interval_ps=4.0):
+                distance=2.5, speed=0.005, report_interval_ps=0.1, log_interval_ps=0.4, traj_interval_ps=4.0,
+                spring_k=None, checkpoint_file=None, label='smd'):
         """Steer the H-bond from ``start_dist`` to ``start_dist + distance`` (A) at ``speed`` (A/ps).
 
         The steering restraint ``E = k (r - r0)^2`` is switched on with ``r0 = start_dist`` and
         ``r0`` is advanced every ``report_interval_ps``. One row per increment is written to
         ``dat_file`` in the AMBER ``jar=1`` format (``r0  r  force  work``; A, kcal/mol/A,
-        kcal/mol), where ``r`` and ``force`` are measured at the end of the increment.
+        kcal/mol), where ``r`` and ``force`` are measured at the end of the increment. A negative
+        ``distance`` steers the pair together (e.g. the reverse process of a forward pull).
+
+        Args:
+            spring_k (float, optional): spring constant for this run in kcal/mol/A^2 (default: the
+                ``smd_spring_k`` of the simulation).
+            checkpoint_file (str, optional): checkpoint of the final state.
+            label (str): phase name stored in ``self.timings``.
 
         Returns:
             numpy.ndarray: the work profile written to ``dat_file`` (n_increments x 4).
         """
         temperature = float(temperature)
         steps_per_update = max(1, int(round(report_interval_ps / self.dt)))
-        n_updates = int(round(distance / (speed * steps_per_update * self.dt)))
+        n_updates = max(1, int(round(abs(distance) / (speed * steps_per_update * self.dt))))
         dr = distance / n_updates / 10.0                      # nm per increment
-        k = self._smd_k                                      # kJ/mol/nm^2
+        k = self._smd_k if spring_k is None else _to_kj_per_nm2(spring_k)   # kJ/mol/nm^2
         r0 = start_dist / 10.0                               # nm
-        self._set_phase('smd', temperature)
+        self._set_phase('smd', temperature, smd_k=k)
         self.context.setParameter('smd_r0', r0)
         self._attach_reporters(csv_file, dcd_file, n_updates * steps_per_update, log_interval_ps, traj_interval_ps)
 
@@ -316,11 +390,11 @@ class DuckSimulation:
             r = r0 - derivative / (2 * k)
             profile[j] = (r0 * 10.0, r * 10.0, derivative / KJ_PER_KCAL / 10.0, work / KJ_PER_KCAL)
         elapsed = time.time() - start
-        self.timings.append(dict(phase='smd', temperature=temperature, simulated_ps=n_updates * steps_per_update * self.dt,
+        self.timings.append(dict(phase=label, temperature=temperature, simulated_ps=n_updates * steps_per_update * self.dt,
                                  wall_s=elapsed))
         np.savetxt(dat_file, profile, fmt='%12.5f', delimiter='  ')
-        self._finish_phase(pdb_file)
-        print(f'  SMD at {temperature:g} K ({start_dist:g} -> {start_dist + distance:g} A): {elapsed:.0f} s '
+        self._finish_phase(pdb_file, checkpoint_file)
+        print(f'  SMD at {temperature:g} K ({start_dist:.2f} -> {start_dist + distance:.2f} A): {elapsed:.0f} s '
               f'({_ns_per_day(n_updates * steps_per_update * self.dt, elapsed)})')
         if csv_file:
             check_temperature(csv_file, temperature)
@@ -336,7 +410,7 @@ def _ns_per_day(simulated_ps, elapsed_s):
 TIMING_COLUMNS = ['cycle', 'phase', 'temperature', 'simulated_ps', 'wall_s', 'ns_per_day', 'device']
 
 
-def _append_timing(timings_file, cycle, record, device):
+def append_timing(timings_file, cycle, record, device):
     """Append the wall time of one MD/SMD run to ``timings_file`` (CSV, header written on creation)."""
     new = not os.path.exists(timings_file)
     with open(timings_file, 'a', newline='') as fh:
@@ -350,7 +424,7 @@ def _append_timing(timings_file, cycle, record, device):
 
 def run_duck_cycles(checkpoint, pickle_file='complex_system.pickle', n_cycles=20, md_length=0.5, gpu_id=None,
                     start_dist=2.5, init_velocity=0.00001, save_dir='duck_runs', wqb_threshold=None, hmr=False,
-                    temperatures=(300, 325), traj_interval_ps=4.0, **simulation_kwargs):
+                    temperatures=(300, 325), traj_interval_ps=4.0, waters_to_restrain=0, **simulation_kwargs):
     """Run the DUck production: ``n_cycles`` x (MD + SMD at each temperature + WQB check).
 
     Existing outputs are reused, so an interrupted run can simply be relaunched: ``md_{i}.chk``
@@ -371,6 +445,7 @@ def run_duck_cycles(checkpoint, pickle_file='complex_system.pickle', n_cycles=20
         hmr (bool): run with a 4 fs time step on a mass-repartitioned system.
         temperatures (sequence): SMD temperatures in K.
         traj_interval_ps (float): DCD output interval for MD and SMD (0 disables trajectories).
+        waters_to_restrain (int): also restrain the first N (retained) waters, e.g. for water steering.
         **simulation_kwargs: extra options for ``DuckSimulation`` (precision, integrator, ...).
 
     Returns:
@@ -385,6 +460,8 @@ def run_duck_cycles(checkpoint, pickle_file='complex_system.pickle', n_cycles=20
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     structure, key_interaction = load_complex_pickle(pickle_file)
+    if waters_to_restrain:
+        simulation_kwargs['restrained_atoms'] = getRestrainedAtoms(structure, waters_to_restrain)
     simulation = DuckSimulation(structure, key_interaction, gpu_id=gpu_id, hmr=hmr, **simulation_kwargs)
     simulation.load_checkpoint(checkpoint)
     simulation.set_restraint_reference()  # restraints relative to the equilibrated system, as AMBER -ref 3_eq.rst
@@ -404,8 +481,9 @@ def run_duck_cycles(checkpoint, pickle_file='complex_system.pickle', n_cycles=20
             print(f'Simulating md_{i}')
             simulation.run_md(md_length, csv_file=f'{md}.csv', dcd_file=f'{md}.dcd', pdb_file=f'{md}.pdb',
                               checkpoint_file=f'{md}.chk', traj_interval_ps=traj_interval_ps)
-            _append_timing(timings_file, i, simulation.timings[-1], device)
+            append_timing(timings_file, i, simulation.timings[-1], device)
             if not check_if_equlibrated(f'{md}.csv', 3):
+                Path(f'{md}.chk').unlink()  # so a relaunch does not reuse the rejected MD
                 raise EquilibrationError(f'md_{i} is not stable; stopping the DUck production.')
         md_state = simulation.get_state()
 
@@ -419,7 +497,7 @@ def run_duck_cycles(checkpoint, pickle_file='complex_system.pickle', n_cycles=20
                 simulation.run_smd(temperature, f'{smd}.dat', csv_file=f'{smd}.csv', dcd_file=f'{smd}.dcd',
                                    pdb_file=f'{smd}.pdb', start_dist=start_dist, speed=speed,
                                    traj_interval_ps=traj_interval_ps)
-                _append_timing(timings_file, i, simulation.timings[-1], device)
+                append_timing(timings_file, i, simulation.timings[-1], device)
             wqb = get_Wqb_value(f'{smd}.dat')[0]
             if wqb_threshold is not None and wqb < wqb_threshold:
                 print(f'DUck replica {i}_{temperature} yielded a WQB of {wqb:.2f} kcal/mol, which is lower than '
