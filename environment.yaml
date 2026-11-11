@@ -1,20 +1,23 @@
+# OpenDUck environment with the newest versions that pass the tests (README, "Tested platforms"). To reproduce the
+# published validation exactly, use environment-py39.yaml (Python 3.9, OpenMM 7.5.1, AmberTools 22).
 name: openduck
 channels:
   - conda-forge
-  - defaults
 dependencies:
-  - python=3.9
-  - numpy=1.23.5
-  - yank=0.25.2
-  - pdbfixer=1.7
-  - openff-toolkit=0.9.0
-  - parmed=3.4.3
-  - cudatoolkit=11.7.0
-  - openmm=7.5
-  - openmmforcefields=0.9.0
-  - ambertools=22.0
-  - pandas
-  - scipy
-  - matplotlib
-  - pyyaml
-  - pytest
+  - python=3.14
+  - openmm=8.6.1
+  # OpenMM compiles its GPU kernels at run time, so the NVIDIA driver must support this CUDA version or a newer one
+  # ("CUDA Version" in nvidia-smi). 12.9 is the oldest CUDA of OpenMM 8.6.1.
+  - cuda-version=12.9
+  - ambertools=26.0
+  - openff-toolkit=0.19.0
+  - openmmforcefields=0.16.0
+  - pdbfixer=1.12
+  - parmed=4.3.1
+  - rdkit=2026.09.1  # 2026.09.2 has no macOS Intel build for Python 3.14
+  - numpy=2.5.4
+  - pandas=3.1.1
+  - scipy=1.18.1
+  - matplotlib=3.11.2
+  - pyyaml=6.0.3
+  - pytest=9.2.0

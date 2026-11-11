@@ -1,0 +1,23 @@
+# Environment of the published OpenDUck validation: Python 3.9, OpenMM 7.5.1, AmberTools 22 (Linux x86-64 only,
+# glibc >= 2.17). AM1-BCC ligand charges depend on the RDKit version (the conformer is generated with RDKit), so use
+# this file to reproduce the published results exactly; environment.yaml has the newest tested versions.
+name: openduck-py39
+channels:
+  - conda-forge
+dependencies:
+  - python=3.9
+  - openmm=7.5.1
+  - cudatoolkit=11.7.0
+  - ambertools=22.0
+  - openff-toolkit=0.9.0
+  - openmmforcefields=0.9.0
+  - pdbfixer=1.7
+  - parmed=3.4.3
+  - rdkit=2023.03.3
+  - numpy=1.23.5
+  - pandas=2.3.1
+  - scipy=1.13.1
+  - matplotlib-base=3.9.4
+  - pyyaml=5.4.1
+  - pytest=8.4.1  # newest conda-forge pytest for Python 3.9
+  - setuptools<81  # pkg_resources, used by openff-toolkit and openmmforcefields 0.9.0, was removed in setuptools 81

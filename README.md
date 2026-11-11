@@ -15,7 +15,7 @@ The library is also the base for new steering protocols. `openduck-crooks` is on
 
 ## Installation
 
-We recommend you install OpenDUck into a fresh Conda environment.
+We recommend you install OpenDUck into a fresh Conda environment with packages from conda-forge (e.g. with [Miniforge](https://github.com/conda-forge/miniforge)).
 ```bash
 git clone git@github.com:CBDD/openduck.git
 cd openduck
@@ -23,14 +23,24 @@ conda env create -f environment.yaml
 conda activate openduck
 pip install .            # or `pip install -e .` for development
 ```
-Run the unit tests with `python -m pytest tests` and an end-to-end smoke test with `./test.sh DATA_DIR [GPU_ID]` (see the header of `test.sh` for the input files it needs).
+There are two environment files:
 
-### Singularity
-A Singularity definition file (`openDUck_singularity.def`) is included in the repository to build a self-contained image:
+* `environment.yaml` has the newest versions that pass the tests: Python 3.14, OpenMM 8.6.1, AmberTools 26.0 and openff-toolkit 0.19.0. It installs CUDA 12.9 libraries, so OpenMM needs an NVIDIA driver for CUDA 12.9 or newer ("CUDA Version" in `nvidia-smi`).
+* `environment-py39.yaml` is the environment of the published validation: Python 3.9, OpenMM 7.5.1, AmberTools 22 and CUDA 11.7. Use it to reproduce those results exactly, or with older drivers. It creates the environment `openduck-py39`.
+
+Python 3.10–3.13 also work (see [Tested platforms](#tested-platforms)).
+
+Run the unit tests with `python -m pytest tests` (`-m "not slow"` skips the two ligand parametrizations, a few minutes each). Run an end-to-end smoke test with `./test.sh DATA_DIR [GPU_ID]`; the header of `test.sh` lists the input files it needs.
+
+### Containers
+Apptainer/Singularity and Docker images are built from the repository root and contain the conda environment of `environment.yaml`. Add `--build-arg ENV_FILE=environment-py39.yaml` to build the published one instead.
 
 ```bash
-singularity build openDUck.sif openDUck_singularity.def
-singularity exec openDUck.sif openduck -h
+apptainer build openDUck.sif openDUck_singularity.def    # or singularity build; runs the unit tests (--notest skips them)
+apptainer exec --nv openDUck.sif openduck -h
+
+docker build -t openduck .
+docker run --rm --gpus all -v "$PWD":/work -w /work openduck openduck -h
 ```
 
 ## OpenDUck usage
@@ -331,3 +341,40 @@ The analysis functions (`duck.utils.analysis_and_report`, `duck.utils.crooks`), 
 ### Changes in 0.3
 
 See [CHANGELOG.md](CHANGELOG.md). The OpenMM production was rewritten to reproduce the AMBER protocol and to run ~20 times faster; **OpenMM results are therefore not directly comparable with those of OpenDUck ≤ 0.2**, which used a spring half as stiff as AMBER's, a steering anchor updated every 400 fs that pulled only the ligand atom, restrained Na<sup>+</sup>/Cl<sup>-</sup> ions, chunk restraints referenced to the pre-minimisation coordinates and, with HMR, half the steering speed at 300 K.
+
+## Tested platforms
+
+OpenDUck was tested on Linux x86-64 (Ubuntu 24.04 under WSL2, glibc 2.39, November 2026). Each row is a separate conda-forge environment, in which two test sets were run on the CPU:
+
+* unit tests: `python -m pytest tests`, 104 tests, including the preparation of a solvated complex with GAFF2 and SMIRNOFF ligand parameters;
+* end-to-end test: `./test.sh DATA_DIR`, with chunking, `amber-prepare`, `openmm-full-protocol`, `openmm-from-equilibrated` and `report`.
+
+| Python | OpenMM | AmberTools | openff-toolkit | openmmforcefields | RDKit | NumPy | Unit tests | `test.sh` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 3.9 (`environment-py39.yaml`) | 7.5.1 | 22.0 | 0.9.0 | 0.9.0 | 2023.03.3 | 1.23.5 | passed | passed |
+| 3.9 | 8.3.1 | 22.5 | 0.16.5 | 0.12.0 | 2023.03.3 | 1.26.4 | passed | passed |
+| 3.10<sup>1</sup> | 8.6.0 | 24.8 | 0.16.10 | 0.14.2 | 2025.03.6 | 2.2.6 | passed | passed |
+| 3.11 | 8.6.1 | 26.0 | 0.18.0 | 0.16.0 | 2026.03.1 | 2.4.6 | passed | passed |
+| 3.12 | 8.6.1 | 26.0 | 0.19.0 | 0.16.0 | 2026.03.1 | 2.5.4 | passed | passed |
+| 3.13 | 8.6.1 | 26.0 | 0.19.0 | 0.16.0 | 2026.03.1 | 2.5.4 | passed | passed |
+| 3.14 (`environment.yaml`) | 8.6.1 | 26.0 | 0.19.0 | 0.16.0 | 2026.09.1 | 2.5.4 | passed | passed |
+
+<sup>1</sup> With `setuptools<81`. With Python 3.10, conda installs openff-amber-ff-ports 0.0.4, which imports `pkg_resources`; setuptools 81 removed it, so SMIRNOFF parametrization fails without the pin.
+
+The unit tests were also run inside other Linux distributions. The environment was mounted into containers of older distributions so that its programs used their glibc, and fresh containers were built from `openDUck_singularity.def`:
+
+| Distribution | glibc | `environment-py39.yaml` | `environment.yaml` |
+| --- | --- | --- | --- |
+| CentOS 7 | 2.17 | passed | passed |
+| Rocky Linux 8 | 2.28 | passed | passed |
+| Ubuntu 20.04 | 2.31 | passed | passed |
+| Rocky Linux 9 | 2.34 | passed, as a container build | not tested |
+| Ubuntu 24.04 | 2.39 | passed | passed, also as a container build |
+
+Other systems:
+
+* macOS (Intel and Apple Silicon): `environment.yaml` can be installed on macOS 13.3 or newer (checked with the conda solver), but OpenDUck has not been run on macOS. There is no CUDA on macOS; without `-g`, OpenMM runs on the CPU. `environment-py39.yaml` is Linux only.
+* Windows: conda-forge has no AmberTools for Windows, so use WSL2. The tests above ran under WSL2.
+* GPU: the tests above ran on the CPU. The GPU (CUDA) runs, including the performance figures above, used `environment-py39.yaml` on an RTX 3070.
+
+The same topology and coordinates give the same energy in OpenMM 7.5.1 and 8.6.1, term by term to 10<sup>-6</sup> kcal/mol. The AM1-BCC charges of a ligand, however, can differ by up to 0.06 e between RDKit versions, because openff-toolkit computes them on a conformer generated by RDKit rather than on the input pose. `environment-py39.yaml` reproduces the charges of the published validation.

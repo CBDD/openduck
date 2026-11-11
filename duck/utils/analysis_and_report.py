@@ -233,8 +233,7 @@ def build_report_df(info_dict, mode='min', sorting_column='System'):
     else:
         raise ValueError(f'{mode} is not a valid report mode. Try with min, single, avg, jarzynski or all.')
 
-    df.sort_values(sorting_column, inplace=True)
-    return df
+    return df.sort_values(sorting_column)
 
 
 def find_wqb_min_index(work, segment=WQB_SEGMENT):

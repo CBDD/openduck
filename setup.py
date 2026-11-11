@@ -26,13 +26,20 @@ setup(
         "Intended Audience :: Science/Research",
         "Topic :: Scientific/Engineering :: Chemistry",
         "License :: OSI Approved :: Apache Software License",
+        "Operating System :: POSIX :: Linux",
         "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
+        "Programming Language :: Python :: 3.14",
     ],
     keywords="dynamic undocking, steered molecular dynamics, OpenMM, AMBER, drug discovery",
-    python_requires=">=3.8",
+    python_requires=">=3.9",
     packages=find_packages(exclude=["contrib", "docs", "tests", "test"]),
     # OpenMM, AmberTools, parmed, RDKit, PDBFixer, openff-toolkit and openmmforcefields are installed with conda
-    # (see environment.yaml).
+    # (see environment.yaml and environment-py39.yaml).
     install_requires=["numpy", "pandas", "scipy", "matplotlib", "pyyaml"],
     extras_require={"test": ["pytest"]},
     package_data={

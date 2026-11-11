@@ -39,7 +39,8 @@ check_WQB(){{
    wqb_limit=$1
    lowest_wqb=$(python getWqbValues.py CYCLE forward.dat)
    echo $lowest_wqb > wqb.log
-   are_we_above_the_limit=$(echo "$lowest_wqb < $wqb_limit" | bc )
+   # python, not bc: bc is missing from minimal images (the threshold would silently never trigger)
+   are_we_above_the_limit=$(python -c "print(int(float('$lowest_wqb') < float('$wqb_limit')))" 2> /dev/null)
    if [ "$are_we_above_the_limit" == "1" ]; then
       echo "Wqb lower than ${{wqb_limit}}, stopping the bidirectional run"
       if [ $LIG_TARGET ]; then
