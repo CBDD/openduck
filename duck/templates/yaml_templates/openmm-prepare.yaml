@@ -15,10 +15,12 @@ protein_forcefield : amber14-all
 water_model : spce
 ionic_strength : 0.1
 solvent_buffer_distance : 12
-waters_to_retain : None
+waters_to_retain : None  # None or a PDB file with the structural waters
 fix_ligand : True
 
 #Equilibration arguments
 do_equilibrate : True
 gpu_id : 0
 force_constant_eq : 1
+HMR : False
+precision : mixed

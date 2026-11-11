@@ -1,210 +1,59 @@
-import simtk.openmm as mm
-import simtk.openmm.app as app
-import simtk.unit as u
+"""Single steered MD (SMD) run, kept for backward compatibility.
 
-#!#from mdtraj.reporters import HDF5Reporter
-import numpy as np
+See :mod:`duck.steps.production` for the description of the steering protocol. The DUck
+production loop uses :class:`duck.steps.production.DuckSimulation` directly; this wrapper
+builds a one-off simulation from a checkpoint.
+"""
+import os
 import sys
-import pickle, os
-from duck.utils import duck_stuff, cal_ints
+
+from duck.steps.production import DuckSimulation, speed_from_init_velocity
+from duck.utils.compat import unit as u
+from duck.utils.duck_stuff import load_complex_pickle
 
 
-def run_steered_md(
-    temperature,
-    checkpoint_in_file,
-    csv_out_file,
-    dat_out_file,
-    pdb_out_file,
-    traj_out_file,
-    startdist,
-    spring_constant=50,
-    force_constant_chunk=0.1,
-    init_velocity=0.00001,
-    gpu_id=0,
-    hmr=False
-):
-    '''
-    Run steered molecular dynamics (SMD) simulation in openMM, pulling a ligand along its main interaction with the protein, and write the results to output files.
-    The SMD simulation uses a custom external force to apply a harmonic restraint on a chunk of atoms in the system, and pulls the restrained
-    atoms along a straight line between two points with a constant velocity.
+def run_steered_md(temperature, checkpoint_in_file, csv_out_file, dat_out_file, pdb_out_file, traj_out_file,
+                   startdist, spring_constant=50, force_constant_chunk=1.0, init_velocity=0.00001, gpu_id=0,
+                   hmr=False, pickle_file='complex_system.pickle', **simulation_kwargs):
+    """Steer the key H-bond from ``startdist`` to ``startdist + 2.5`` A and write the work profile.
 
     Args:
-        temperature (Quantity): The temperature to perform the simulation at.
-        checkpoint_in_file (str): The file path of the input checkpoint file.
-        csv_out_file (str): The file path of the output CSV file to write simulation data to.
-        dat_out_file (str): The file path of the output text file to write simulation data to.
-        pdb_out_file (str): The file path of the output PDB file to write the final state of the simulation to.
-        startdist (float): The starting distance of the restrained atoms from their original positions, in angstroms.
-        spring_constant (float, optional): The spring constant of the harmonic restraint applied to the restrained atoms. Default is 50.
-        force_constant_chunk (float, optional): The force constant of the restraint applied to the chunk of atoms. Default is 0.1.
-        init_velocity (float, optional): The initial velocity of the restrained atoms, in angstroms per picosecond. Default is 0.00001.
-        gpu_id (int, optional): The ID of the GPU to use for the simulation. If not provided, the simulation will run on the CPU.
-    '''
+        temperature (float or Quantity): temperature in K.
+        checkpoint_in_file (str): checkpoint to start from (end of the preceding MD).
+        csv_out_file (str): StateDataReporter log.
+        dat_out_file (str): work profile in the AMBER ``jar=1`` format (r0, r, force, work).
+        pdb_out_file (str): final coordinates. If it already exists the simulation is skipped.
+        traj_out_file (str): trajectory.
+        startdist (float): initial target distance in A.
+        spring_constant (float): k of ``E = k (r - r0)^2`` in kcal/mol/A^2, AMBER convention
+            (``rk2`` in ``dist_duck.rst``). The original OpenMM implementation used
+            ``0.5 * k``, i.e. a spring half as stiff as AMBER's.
+        force_constant_chunk (float): chunk heavy-atom restraint in kcal/mol/A^2.
+        init_velocity (float): steering speed in A per 2 fs (legacy unit; 1e-5 = 5 A/ns).
+        gpu_id (int, optional): GPU index, ``None`` for CPU.
+        hmr (bool): 4 fs time step (the steering speed in A/ps is unchanged).
+        pickle_file (str): preparation pickle with the structure and the key interaction.
+        **simulation_kwargs: extra options for ``DuckSimulation`` (precision, integrator, ...).
+
+    Returns:
+        numpy.ndarray or None: the work profile, or None if the run was skipped.
+    """
     if os.path.isfile(pdb_out_file):
-        print(f'{pdb_out_file} is already calculated, skipping' )
-        return
-    
-    dt,  steps_per_move, steps_to_report = 0.002, 200, 2000
-    if hmr: dt, steps_per_move, steps_to_report = 0.004, 100, 1000
-    spring_k = spring_constant * u.kilocalorie / (u.mole * u.angstrom * u.angstrom)
-    dist_in = startdist * u.angstrom  # in angstrom
-    dist_fin = (startdist + 2.5) * u.angstrom  # in angstrom
-    velocity = init_velocity * u.angstrom
-    # Platform definition
-    platformProperties = {}
-    if gpu_id != None:
-        platform = mm.Platform_getPlatformByName("CUDA")
-        platformProperties["CudaPrecision"] = "double"
-        platformProperties["DeviceIndex"]=str(gpu_id)
-    else:
-        platform = mm.Platform_getPlatformByName("CPU")
-    platformProperties["DeterministicForces"] = 'true'
-    #print("loading pickle")
-    pickle_in = open("complex_system.pickle", "rb")
-    pkl = pickle.load(pickle_in)
-    combined_pmd = pkl[0]
-    print(combined_pmd)
-    keyInteraction = pkl[1:]
-    pickle_in.close()
-    print(keyInteraction)
-    # Get indexes of heavy atoms in chunk
-    Chunk_Heavy_Atoms = duck_stuff.getHeavyAtomsInSystem(combined_pmd)
-    # Setting System
-    system = combined_pmd.createSystem(
-        nonbondedMethod=app.PME,
-        nonbondedCutoff=9 * u.angstrom,
-        constraints=app.HBonds,
-        hydrogenMass=None,
-    )
-    # Apply force on all havy atoms of chunk
-    duck_stuff.applyHarmonicPositionalRestraints(
-        system, force_constant_chunk, combined_pmd.positions, Chunk_Heavy_Atoms
-    )
-    # Integrator
-    integrator = mm.LangevinIntegrator(
-        temperature, 4 / u.picosecond, dt * u.picosecond
-    )
-    # Setting Simulation object and loading the checkpoint
-    simulation = app.Simulation(
-        combined_pmd.topology, system, integrator, platform, platformProperties
-    )
-    simulation.loadCheckpoint(checkpoint_in_file)
-    # SMD force definition
-    pullforce = mm.CustomExternalForce(
-        "k_sp*0.5*(R-R0)^2; \
-                                       R = periodicdistance(x, y, z, x0, y0, z0);"
-    )
-    pullforce.addPerParticleParameter("k_sp")
-    pullforce.addGlobalParameter("x0", 0.0 * u.nanometer)
-    pullforce.addGlobalParameter("y0", 0.0 * u.nanometer)
-    pullforce.addGlobalParameter("z0", 0.0 * u.nanometer)
-    pullforce.addGlobalParameter("R0", 0.0 * u.nanometer)
-    pullforce.addParticle(keyInteraction[1], [spring_k])
-    system.addForce(pullforce)
-    # Redefine integrator and simulation, and load checkpoint with new-updated system
-    integrator = mm.LangevinIntegrator(
-        temperature, 4 / u.picosecond, dt * u.picosecond
-    )
-    simulation = app.Simulation(
-        combined_pmd.topology, system, integrator, platform, platformProperties
-    )
-    simulation.loadCheckpoint(checkpoint_in_file)
-    # Initializing energy
-    work_val_old = u.Quantity(value=0, unit=u.kilocalorie / u.mole)
-    # Number of big steps and pull distance
-    steps = int(round((dist_fin - dist_in) / velocity) / steps_per_move)
-    pull_distance = velocity * steps_per_move
-    # Reporters and duck.dat file
-    simulation.reporters.append(
-        app.StateDataReporter(
-            csv_out_file,
-            steps_per_move,
-            step=True,
-            time=True,
-            totalEnergy=True,
-            kineticEnergy=True,
-            potentialEnergy=True,
-            temperature=True,
-            density=True,
-            progress=True,
-            totalSteps=steps_per_move * steps,
-            speed=True,
-        )
-    )
-    simulation.reporters.append(app.DCDReporter(traj_out_file, steps_to_report))
-    f = open(dat_out_file, "w")
-    # Production in N steps with the update every 200 steps (2 pm)
-    for i in range(steps):
-        # Get current state tu update the system
-        state = simulation.context.getState(getPositions=True)
-        pos_keyInt = state.getPositions()
-        keyInteraction_pos = [
-            pos_keyInt[keyInteraction[0]],
-            pos_keyInt[keyInteraction[1]],
-        ]
-        # Get radius of starting point and end point
-        R_val = dist_in + float(i + 1) * pull_distance
-        R_val_start = dist_in + float(i) * pull_distance
-        # Get distance of main interaction
-        keyInteraction_dist = np.linalg.norm(
-            keyInteraction_pos[0] - keyInteraction_pos[1]
-        )
-        formated_dist = round(float(str(keyInteraction_dist).split()[0]),6)
-        print(f'{formated_dist} nm\r', end='')
-        # Updated system
-        simulation.context.setParameter("x0", keyInteraction_pos[0][0])
-        simulation.context.setParameter("y0", keyInteraction_pos[0][1])
-        simulation.context.setParameter("z0", keyInteraction_pos[0][2])
-        simulation.context.setParameter("R0", R_val)
-        # Calculate force F = -k * x
-        force_val = -spring_k * (keyInteraction_dist - R_val)
-        # Make step
-        simulation.step(steps_per_move)
-        # Calculate work for difference in potential energy in tranzition
-        # W = EK_end - EK_start
-        # EK = 0.5 * k * x^2
-        spr_energy_end = 0.5 * spring_k * (keyInteraction_dist - R_val) ** 2
-        spr_energy_start = 0.5 * spring_k * (keyInteraction_dist - R_val_start) ** 2
-        work_val = work_val_old + spr_energy_end - spr_energy_start
-        work_val_old = work_val
-        # Write duck.dat file
-        f.write(
-            str(i)
-            + " "
-            + str(R_val)
-            + " "
-            + str(keyInteraction_dist)
-            + " "
-            + str(force_val)
-            + " "
-            + str(work_val)
-            + "\n"
-        )
-    f.close()
-    # Save state in PDB file
-    positions = simulation.context.getState(getPositions=True).getPositions()
-    app.PDBFile.writeFile(simulation.topology, positions, open(pdb_out_file, "w"))
-    print('')
+        print(f'{pdb_out_file} is already calculated, skipping')
+        return None
+    if u.is_quantity(temperature):
+        temperature = temperature.value_in_unit(u.kelvin)
+    structure, key_interaction = load_complex_pickle(pickle_file)
+    simulation = DuckSimulation(structure, key_interaction, gpu_id=gpu_id, hmr=hmr, temperature=temperature,
+                                chunk_restraint_k=force_constant_chunk, smd_spring_k=spring_constant,
+                                **simulation_kwargs)
+    simulation.load_checkpoint(checkpoint_in_file)
+    return simulation.run_smd(temperature, dat_out_file, csv_file=csv_out_file, dcd_file=traj_out_file,
+                              pdb_file=pdb_out_file, start_dist=startdist,
+                              speed=speed_from_init_velocity(init_velocity))
 
 
 if __name__ == "__main__":
     if len(sys.argv) != 8:
-        sys.exit(
-            "Usage steered_md.py temperature in.chk out.csv out.dat out.pdb out.dcd startdist"
-        )
-    temperature = float(sys.argv[1]) * u.kelvin
-    checkpoint_in_file = sys.argv[2]
-    csv_out_file = sys.argv[3]
-    dat_out_file = sys.argv[4]
-    pdb_out_file = sys.argv[5]
-    traj_out_file = sys.argv[6]
-    startdist = float(sys.argv[7])
-    run_steered_md(
-        temperature,
-        checkpoint_in_file,
-        csv_out_file,
-        dat_out_file,
-        pdb_out_file,
-        traj_out_file,
-        startdist,
-    )
+        sys.exit("Usage: steered_md.py temperature in.chk out.csv out.dat out.pdb out.dcd startdist")
+    run_steered_md(float(sys.argv[1]), *sys.argv[2:7], float(sys.argv[7]))

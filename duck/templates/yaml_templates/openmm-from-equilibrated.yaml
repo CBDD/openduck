@@ -5,3 +5,7 @@ smd_cycles : 20
 md_length : 0.5
 wqb_threshold : 6
 gpu_id : 0
+init_distance : 2.5
+HMR : False
+precision : mixed
+trajectory_interval : 4

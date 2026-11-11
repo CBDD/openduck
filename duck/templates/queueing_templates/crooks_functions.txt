@@ -1,0 +1,52 @@
+##### FUNCTIONS ####
+# Distance (A) between the steered atoms in the restart file $1 (topology $2)
+current_distance(){{
+   rm -f current_distance.dat
+   printf "trajin $1\ndistance d @{prot_idx} @{lig_idx} out current_distance.dat\nrun\nquit\n" | cpptraj -p $2 > /dev/null
+   awk 'NR==2 {{printf "%.3f", $2}}' current_distance.dat
+}}
+
+# Approach (optional), forward and reverse pulls of cycle $1, branching from md_$1.rst
+run_bidirectional_cycle(){{
+   i=$1
+   mkdir -p CYCLE_${{i}}
+   cd CYCLE_${{i}}
+   start=../md_${{i}}.rst
+   if [ "{approach}" == "1" ]; then
+      if [ ! -f approach.rst ]; then
+         distance=$(current_distance $start ../{top})
+         if ! [[ "$distance" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "Could not measure the distance of the steered atoms in $start (cpptraj); stopping." >&2
+            exit 1
+         fi
+         sed "s/CURRENT_DISTANCE/$distance/" ../dist_approach.rst > dist_approach.rst
+         pmemd.cuda -O -i ../approach.in -o approach.out -p ../{top} -c $start -r approach.rst -ref ../3_eq.rst
+      fi
+      start=approach.rst
+   fi
+   if [ ! -f forward.rst ]; then
+      pmemd.cuda -O -i ../forward.in -o forward.out -p ../{top} -c $start -r forward.rst -x forward.nc -ref ../3_eq.rst
+   fi
+   # new velocities (irest=0) from the final coordinates of the forward pull
+   if [ ! -f reverse.rst ]; then
+      pmemd.cuda -O -i ../reverse.in -o reverse.out -p ../{top} -c forward.rst -r reverse.rst -x reverse.nc -ref ../3_eq.rst
+   fi
+   cd ..
+}}
+
+# Stop if the lowest WQB of the forward pulls is below the threshold (getWqbValues.py, CYCLE_*/forward.dat)
+check_WQB(){{
+   wqb_limit=$1
+   lowest_wqb=$(python getWqbValues.py CYCLE forward.dat)
+   echo $lowest_wqb > wqb.log
+   # python, not bc: bc is missing from minimal images (the threshold would silently never trigger)
+   are_we_above_the_limit=$(python -c "print(int(float('$lowest_wqb') < float('$wqb_limit')))" 2> /dev/null)
+   if [ "$are_we_above_the_limit" == "1" ]; then
+      echo "Wqb lower than ${{wqb_limit}}, stopping the bidirectional run"
+      if [ $LIG_TARGET ]; then
+          cd ${{RUN_DIR:-.}}   # back to the run folder if inside EQ_<k>/ (independent equilibrations)
+          cp -r ./* $LIG_TARGET/
+      fi
+      exit
+   fi
+}}

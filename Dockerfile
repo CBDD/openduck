@@ -1,26 +1,33 @@
-FROM nvidia/cuda:9.2-base
+# OpenDUck with the conda environment of environment.yaml. Build from the repository root:
+#     docker build -t openduck .
+#     docker run --rm --gpus all -v "$PWD":/work -w /work openduck openduck openmm-full-protocol -y input.yaml
+# Build arguments (--build-arg NAME=VALUE):
+#     ENV_FILE  environment.yaml (newest tested versions, CUDA 12.9) or environment-py39.yaml (published
+#               validation, CUDA 11.7). The GPU driver must support that CUDA version ("CUDA Version" in nvidia-smi).
+FROM ubuntu:24.04
 LABEL maintainer="Anthony Bradley <anthony.richard.bradley@gmail.com>"
+ARG ENV_FILE=environment.yaml
 
-# Install miniconda
-RUN apt-get update && apt-get install -y wget g++ gcc mercurial ssh openssh-client
+RUN apt-get update -qq \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends wget ca-certificates bzip2 \
+ && rm -rf /var/lib/apt/lists/*
 
-RUN apt-get install -y bzip2
-RUN MINICONDA="Miniconda3-latest-Linux-x86_64.sh" && \
-    wget --quiet https://repo.continuum.io/miniconda/$MINICONDA && \
-    bash $MINICONDA -b -p /miniconda && \
-    rm -f $MINICONDA
-ENV PATH /miniconda/bin:$PATH
+# Miniforge: conda-forge only
+RUN wget -q https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O /tmp/miniforge.sh \
+ && bash /tmp/miniforge.sh -b -p /opt/conda \
+ && rm /tmp/miniforge.sh
 
-# copy the repository on the host to the container for installation
-RUN mkdir /usr/local/duck
-COPY . /usr/local/duck
+COPY environment.yaml environment-py39.yaml /opt/openduck/
+RUN /opt/conda/bin/conda env create -q -n openduck -f /opt/openduck/$ENV_FILE \
+ && /opt/conda/bin/conda clean -a -y -q
 
-# install duck and its dependencies / clean up afterwards
-RUN conda update --yes -n base conda \
- && conda env update --quiet -n base --file /usr/local/duck/environment.yaml \
- && conda clean --all --yes \
- && pip install --no-cache-dir /usr/local/duck/
+COPY setup.py README.md LICENSE /opt/openduck/
+COPY duck /opt/openduck/duck
+COPY scripts /opt/openduck/scripts
+COPY tests /opt/openduck/tests
+RUN /opt/conda/envs/openduck/bin/python -m pip install -q --no-deps /opt/openduck
 
-
-ENV LC_ALL=C.UTF-8
-ENV LANG=C.UTF-8
+ENV PATH=/opt/conda/envs/openduck/bin:/opt/conda/bin:$PATH \
+    LC_ALL=C.UTF-8 \
+    LANG=C.UTF-8
+CMD ["openduck", "-h"]

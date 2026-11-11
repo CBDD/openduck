@@ -421,6 +421,8 @@ def write_yaml(
     if args.do_chunk:
         config["do_chunk"] = True
         config["cutoff"] = args.cutoff
+    if args.ignore_buffers:
+        config["ignore_buffers"] = True
 
     with open(yaml_path, "w") as f:
         yaml.dump(config, f, sort_keys=False)

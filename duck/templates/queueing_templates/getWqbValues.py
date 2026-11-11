@@ -1,82 +1,62 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-import numpy as np
+"""Print the lowest WQB of the AMBER DUck replicas in the current directory.
+
+Standalone (numpy only) copy of the WQB calculation in duck.utils.analysis_and_report, so it can run on
+cluster nodes where OpenDUck is not installed. It is copied next to the queue scripts and used by their
+check_WQB function to stop a DUck run early. Only stdout carries the result; warnings go to stderr.
+
+Usage: python getWqbValues.py [folder_prefix (default DUCK) [report_name (default duck.dat)]]
+"""
 import os
 import sys
 
+import numpy as np
+
+
+def find_wqb_min_index(work, segment=200):
+    '''First local minimum of the work profile (searched by segments of 200 points), or None.'''
+    half = segment // 2
+    for i_segment in range(len(work) // segment):
+        index_global = int(np.argmin(work[i_segment * segment:(i_segment + 1) * segment])) + i_segment * segment
+        window_start = index_global - half if index_global > half else 0
+        index_local = int(np.argmin(work[window_start:index_global + half + 1]))
+        if index_global < half:
+            return index_global if index_local == index_global else None
+        if index_local == half:
+            return index_global
+    return None
+
+
 def get_Wqb_value_AMBER(file_duck_dat):
-    f = open(file_duck_dat,'r')
-    data = []
-    for line in f:
-        a = line.split()
-        data.append([float(a[0]), float(a[1]), float(a[2]), float(a[3])])
-    f.close()
-    data = np.array(data)
-    Work = data[:,3]
-    #split it into segments of 200 points 
-    num_segments = int(len(data)/200) 
-    #alayze each segment to see if minimum in the segment is the local minimum
-    #local minimum is the point with the lowest value of 200 neighbouring points
-    #first local minumum is miminum used later to duck analysis
-    Wqb_min_index = False
-    for segment in range(num_segments):
-        #detecting minium inthe segment
-        sub_data = data[segment * 200 : (segment + 1) * 200]
-        sub_Work = sub_data[:,3] 
-        index_local = np.argmin(sub_Work)
-        #segment of 200 points arround detected minimum
-        index_global = index_local + segment * 200
-        if index_global > 100:
-            sub2_data = data[index_global - 100 : index_global + 101]
-        else:
-            sub2_data = data[0 : index_global + 101]
-        sub2_Work = sub2_data[:,3]
-        index_local2 = np.argmin(sub2_Work)
-        if index_global < 100:
-            if index_local2 == index_global:
-                
-                Wqb_min_index = index_global
-            break
-        else:
-            if index_local2 == 100:
-                Wqb_min_index = index_global
-                break
-    if not Wqb_min_index:
-        print('The minima could not be found, setting the Wqb to 0')
-        exit(0)
-    Wqb_min = Work[Wqb_min_index]
-    sub_max_data = data[Wqb_min_index:]
-    sub_max_Work = sub_max_data[:,3]
-    Wqb_max_index = np.argmax(sub_max_Work)
-    Wqb_max_index_global = Wqb_max_index + Wqb_min_index
-    
-    Wqb_max = max(sub_max_Work)
-    
-    Wqb_value = Wqb_max - Wqb_min
-    
-    return(Wqb_value, data, Wqb_min)
+    '''WQB of one AMBER jar=1 report (columns r0, r, force, work); 0 if no work minimum is found.'''
+    data = np.loadtxt(file_duck_dat, ndmin=2)
+    if data.shape[1] != 4:
+        raise ValueError(f'{file_duck_dat} does not have the 4 columns of an AMBER DUck report.')
+    work = data[:, 3]
+    wqb_min_index = find_wqb_min_index(work)
+    if wqb_min_index is None:
+        sys.stderr.write(f'Warning: the work minimum could not be found in {file_duck_dat}, setting its WQB to 0\n')
+        return 0.0, data, 0.0
+    wqb_min = work[wqb_min_index]
+    return np.max(work[wqb_min_index:]) - wqb_min, data, wqb_min
 
-def get_Wqb_value_AMBER_all(prefix = 'DUCK', file = 'duck.dat'):
-    folder = []
-    for fol in os.listdir(os.getcwd()):
-        if fol.startswith(prefix):
-            folder.append(fol)
-            
-    Wqb_values = []
-    for fol in folder:
-        if os.path.isfile(fol+'/'+file):
-            Wqb_data = get_Wqb_value_AMBER(fol+'/'+file)
-            Wqb_values.append(Wqb_data[0])
 
-    Wqb = min(Wqb_values)
-    return(Wqb)
-    
+def get_Wqb_value_AMBER_all(prefix='DUCK', file='duck.dat'):
+    '''Lowest WQB over all <prefix>* folders of the current directory that contain `file`.'''
+    wqb_values = []
+    for fol in sorted(os.listdir(os.getcwd())):
+        dat_file = os.path.join(fol, file)
+        if fol.startswith(prefix) and os.path.isfile(dat_file):
+            wqb_values.append(get_Wqb_value_AMBER(dat_file)[0])
+    if not wqb_values:
+        raise FileNotFoundError(f'No {prefix}*/{file} reports found in {os.getcwd()}')
+    return min(wqb_values)
+
 
 if __name__ == '__main__':
-    if len(sys.argv) > 2:
-        print(sys.argv)
-        print(get_Wqb_value_AMBER_all(sys.argv[1],sys.argv[2]))
-    elif len(sys.argv) > 1:
-        print(get_Wqb_value_AMBER_all(sys.argv[1]))
-    else:
-        print(get_Wqb_value_AMBER_all())
+    try:
+        print(get_Wqb_value_AMBER_all(*sys.argv[1:3]))
+    except (OSError, ValueError) as error:
+        sys.stderr.write(f'Error: {error}\n')
+        sys.exit(1)
