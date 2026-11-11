@@ -1,0 +1,8 @@
+OUT/
+openduck_validation
+openduck_smoke_test/
+*.pdf
+build/
+*.egg-info/
+.git/
+**/__pycache__/
